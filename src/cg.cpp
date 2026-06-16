@@ -101,12 +101,12 @@ void spmv(double alpha, ParMat& A, double* x_d, rocsparse_dnvec_descr vec_x,
 
         MPIL_Start(req);
 
-        spmv(A.sparse_handle, A.d_on_proc.descr, 1.0, vec_x, 
-                0.0, vec_b, A.d_on_proc.buf_size, A.d_on_proc.buffer);
+        spmv(A.sparse_handle, A.d_on_proc.descr, alpha, vec_x, 
+                beta, vec_b, A.d_on_proc.buf_size, A.d_on_proc.buffer);
 
         MPIL_Wait(req, MPI_STATUS_IGNORE);
 
-        spmv(A.sparse_handle, A.d_off_proc.descr, 1.0, vec_recv,
+        spmv(A.sparse_handle, A.d_off_proc.descr, alpha, vec_recv,
                 1.0, vec_b, A.d_off_proc.buf_size, A.d_off_proc.buffer);
     }
     else
@@ -535,7 +535,7 @@ int main(int argc, char* argv[])
             tfinal = (MPI_Wtime() - t0);
             HIP_CHECK(hipMemcpy(r_d, b_d, A.local_rows*sizeof(double),
                     hipMemcpyDeviceToDevice));
-            spmv(-1.0, A, x_d, vec_x, 0.0, r_d, vec_r, mpil_comm,
+            spmv(-1.0, A, x_d, vec_x, 1.0, r_d, vec_r, mpil_comm,
                     sendbuf, recvbuf, vec_recv);
             sum = inner_product(A.blas_handle, A.local_rows, r_d,
                     r_d, &local_norm_b, &sum, mpil_comm, NULL);

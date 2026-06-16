@@ -6,53 +6,33 @@
 
 #include "utils.hpp"
 
-// Serial SpMV b = alpha*A*x + beta*b
-void spmv(double alpha, Mat& A, std::vector<double>& x,
-        double beta, std::vector<double>& b)
-{
-    double sum;
-    int start, end;
-
-    for (int i = 0; i < A.n_rows; i++)
-    {
-        start = A.rowptr[i];
-        end = A.rowptr[i+1];
-        sum = 0;
-        for (int j = start; j < end; j++)
-        {
-            sum += A.data[j] * x[A.col_idx[j]];
-        }
-        b[i] = alpha * sum + beta * b[i];
-    }
-}
-
-
 __global__ void pack(const double* __restrict__ x,
                     const int* __restrict__ idx,
                     double* __restrict__ packed_buf,
                     int n)
 {
     int i = blockIdx.x*blockDim.x + threadIdx.x;
-    if (i < n) packed[i] = x[idx[i]];
+    if (i < n) packed_buf[i] = x[idx[i]];
 }
 
 
 // Parallel SpMV b = alpha*A*x + beta*b 
 void spmv(rocsparse_handle handle, rocsparse_spmat_descr A,
-            double alpha, roscparse_dnvec_descr x, 
+            double alpha, rocsparse_dnvec_descr x, 
             double beta, rocsparse_dnvec_descr y,
-            size_t* tmp_buffer_size, void** tmp_buffer)
+            size_t tmp_buffer_size, void* tmp_buffer)
 {
     ROCSPARSE_CHECK(rocsparse_spmv(handle, rocsparse_operation_none,
             &alpha, A, x, &beta, y, 
             rocsparse_datatype_f64_r,
             rocsparse_spmv_alg_default,
-            rocsparse_spmv_stage_buffer_size,
-            tmp_buffer_size, tmp_buffer);
+            rocsparse_spmv_stage_buffer_compute,
+            &tmp_buffer_size, tmp_buffer);
 }
 
-void spmv(double alpha, ParMat& A, std::vector<double>& x, 
-        double beta, std::vector<double>& b, MPIL_Comm* mpil_comm)
+void spmv(double alpha, ParMat& A, double* x_d, cusparse_dnvec_descr vec_x, 
+        double beta, double* b_d, cusparse_dnvec_descr vec_b, MPIL_Comm* mpil_comm,
+        double* sendbuf, double* recvbuf, cusparse_dnvec_descr vec_recv)
 {
     int proc, start, end;
     int tag = 0;
@@ -78,35 +58,33 @@ void spmv(double alpha, ParMat& A, std::vector<double>& x,
         dim3 threads(256);
         dim3 blocks((A.send_comm.size_msgs + threads.x - 1) / threads.x);
         pack<<<blocks, threads, 0, 0>>>(x_d, A.send_comm.idx_d,
-                sendbuf_d, A.send_comm.size_msgs);
-        HIP_CHECK(hipMemcpy(sendbuf_h, sendbuf_d, A.send_comm.size_msgs * sizeof(double),
-                hipMemcpyDeviceToHost));
+                sendbuf, A.send_comm.size_msgs);
     }
 
-    MPIL_Neighbor_alltoallv_topo(sendbuf_d
+    MPIL_Neighbor_alltoallv_topo(sendbuf
             A.send_comm.counts.data(),
             A.send_comm.ptr.data(),
             MPI_DOUBLE,
-            recvbuf_d
+            recvbuf
             A.recv_comm.counts.data(),
             A.recv_comm.ptr.data(),
             MPI_DOUBLE,
             mpil_topo,
             mpil_comm);
 
-    spmv(
+    spmv(A.sparse_handle, A.on_proc.descr, 1.0, vec_x, 
+            0.0, vec_b, A.on_proc.buf_size, A.on_proc.buffer); 
 
-    spmv(alpha, A.on_proc, x, beta, b);
-
-    spmv(alpha, A.off_proc, recvbuf, 1.0, b);
+    spmv(A.sparse_handle, A.off_proc.descr, 1.0, vec_recv,
+            1.0, vec_b, A.off_proc.buf_size, A.off_proc.buffer);
 
     MPIL_Info_free(&mpil_info);
     MPIL_Topo_free(&mpil_topo);
 }
 
-void spmv(double alpha, ParMat& A, std::vector<double>& x, 
-        double beta, std::vector<double>& b, MPIL_Comm* mpil_comm,
-        std::vector<double>& sendbuf, std::vector<double>& recvbuf,
+void spmv(double alpha, ParMat& A, double* x_d, cusparse_dnvec_descr vec_x,
+        double beta, double* b_d, cusparse_dnvec_descr vec_b, MPIL_Comm* mpil_comm,
+        double* sendbuf, double* recvbuf, cusparse_dnvec_descr vec_recv,
         MPIL_Request* req)
 {
     if (req != NULL)
@@ -120,47 +98,42 @@ void spmv(double alpha, ParMat& A, std::vector<double>& x,
             dim3 threads(256);
             dim3 blocks((A.send_comm.size_msgs + threads.x - 1) / threads.x);
             pack<<<blocks, threads, 0, 0>>>(x_d, A.send_comm.idx_d, 
-                    sendbuf_d, A.send_comm.size_msgs);
-            HIP_CHECK(hipMemcpy(sendbuf_h, sendbuf_d, A.send_comm.size_msgs * sizeof(double),
-                    hipMemcpyDeviceToHost));
+                    sendbuf, A.send_comm.size_msgs);
         }
 
         MPIL_Start(req);
 
-        spmv(alpha, A.on_proc, x, beta, b);
-        spmv(A.sparse_handle, A.on_proc.descr, alpha, A.descr_x, 
-                beta, A.descr_b, A.on_proc.buf_s, A.on_proc.buf);
+        spmv(A.sparse_handle, A.on_proc.descr, 1.0, vec_x, 
+                0.0, vec_b, A.on_proc.buf_size, A.on_proc.buffer);
 
         MPIL_Wait(req, MPI_STATUS_IGNORE);
 
-        spmv(alpha, A.off_proc, recvbuf, 1.0, b);
-        spmv(A.handle, A.off_proc.descr, 
+        spmv(A.sparse_handle, A.off_proc.descr, 1.0, vec_recv,
+                1.0, vec_b, A.off_proc.buf_size, A.off_proc.buffer);
     }
     else
     {
-        spmv(alpha, A, x, beta, b, mpil_comm);
+        spmv(alpha, A, x_d, vec_x, beta, b_d, vec_b, mpil_comm,
+                sendbuf, recvbuf, vec_recv);
     }
 }
 
-void axpy(double alpha, std::vector<double>& x, std::vector<double>& y)
+void axpy(rocblas_handle handle, int n, double alpha, double* x_d,
+            double* y_d)
 {
-    for (int i = 0; i < x.size(); i++)
-        x[i] = x[i] + alpha*y[i];
+    rocblas_daxpy(handle, n, &alpha, y_d, 1, x_d, 1);
 }
 
-void scale(double alpha, std::vector<double>& x)
+void scale(rocblas_handle handle, int n, double alpha, double* x_d)
 {
-    for (int i = 0; i < x.size(); i++)
-        x[i] = alpha*x[i];
+    rocblas_dscal(handle, n, &alpha, x_d, 1);
 }
 
-double inner_product(std::vector<double>& a, std::vector<double>& b,
+double inner_product(rocblos_handle handle, int n, double* a_d, double* b_d,
             double* local_sum_ptr, double* global_sum_ptr,
             MPIL_Comm* mpil_comm, MPIL_Request* mpil_req)
 {
-    *local_sum_ptr = 0;
-    for (int i = 0; i < a.size(); i++)
-        *local_sum_ptr += a[i] * b[i];
+    rocblas_dot(handle, n, a_d, 1, b_d, 1, local_sum_ptr);
 
     if (mpil_req == NULL)
     {
@@ -175,20 +148,32 @@ double inner_product(std::vector<double>& a, std::vector<double>& b,
     return *global_sum_ptr;
 }
 
-int CG(ParMat& A, std::vector<double>& x, std::vector<double>& b,
+int CG(ParMat& A, double* x, rocsparse_dnvec_descr vec_x,
+        double* b, rocsparse_dnvec_descr vec_b,
+        double* sendbuf, double* recvbuf, rocsparse_dnvec_descr vec_recv,
         bool spmv_init, bool allreduce_init)
 {
     int rank, num_procs;
     MPI_Comm_rank(MPI_COMM_WORLD, &rank);
     MPI_Comm_size(MPI_COMM_WORLD, &num_procs);
 
+    double one = 1.0;
+    double zero = 0.0;
+
     // CG Variables
-    std::vector<double> r(A.local_rows);
-    std::vector<double> p(A.local_rows);
-    std::vector<double> Ap(A.local_rows);
+    double *r, *p, *Ap;
+    HIP_CHECK(hipMalloc(void**)&r, A.local_rows*sizeof(double));
+    HIP_CHECK(hipMalloc(void**)&p, A.local_rows*sizeof(double));
+    HIP_CHECK(hipMalloc(void**)&Ap, A.local_rows*sizeof(double));
+
+    rocsparse_dnvec_descr vec_r, vec_p, vec_Ap;
+    ROCSPARSE_CHECK(rocsparse_create_dnvec_descr(&vec_r, A.local_rows,
+            r, rocsparse_datatype_f64_r));
+    ROCSPARSE_CHECK(rocsparse_create_dnvec_descr(&vec_p, A.local_rows,
+            p, rocsparse_datatype_f64_r));
+    ROCSPARSE_CHECK(rocsparse_create_dnvec_descr(&vec_Ap, A.local_rows,
+            Ap, rocsparse_datatype_f64_r));
     std::vector<double> res;
-    std::vector<double> recvbuf(A.recv_comm.size_msgs);
-    std::vector<double> sendbuf(A.send_comm.size_msgs);
 
     // Setup persistent allreduces
     double local_sum, global_sum;
@@ -243,17 +228,17 @@ int CG(ParMat& A, std::vector<double>& x, std::vector<double>& b,
     int max_iter = 500;
 
     // r0 = b - A * x0
-    r = b;
-    spmv(-1.0, A, x, 1.0, r, mpil_comm, sendbuf, recvbuf,
-            mpil_spmv_req);
+    HIP_CHECK(hipMemcpy(r, b, A.local_rows*sizeof(double),
+            hipMemcpyDeviceToDevice));
+    spmv(-1.0, A, x, vec_x, 1.0, r, vec_r, mpil_comm,
+            sendbuf, recvbuf, vec_recv, mpil_spmv_req);
 
     // p0 = r0
     p = r;
 
     // Find initial (r, r) and residual
-    rr_inner = inner_product(r, r, &local_sum, &global_sum,
-            mpil_comm, mpil_req);
-
+    rr_inner = inner_product(A.dblas_handle, A.local_rows, r, 
+            r, &local_sum, &global_sum, mpil_comm, mpil_req);
     norm_r = sqrt(rr_inner);
     res.push_back(norm_r);
 
@@ -271,10 +256,10 @@ int CG(ParMat& A, std::vector<double>& x, std::vector<double>& b,
     while (norm_r > tol && iter < max_iter)
     {
         // alpha_i = (r_i, r_i) / (A*p_i, p_i)
-        spmv(1.0, A, p, 0.0, Ap, mpil_comm, sendbuf, recvbuf, 
-                mpil_spmv_req);
-        App_inner = inner_product(Ap, p, &local_sum, &global_sum,
-            mpil_comm, mpil_req);
+        spmv(1.0, A, p, vec_p, 0.0, Ap, vec_Ap, mpil_comm,
+                sendbuf, recvbuf, vec_recv, mpil_spmv_req);
+        App_inner = inner_product(A.blas_handle, A.local_rows, Ap,
+                p, &local_sum, &globa_sum, mpil_comm, mpil_req);
         if (App_inner < 0.0)
         {
             printf("Indefinite matrix detected in CG! Aborting...\n");
@@ -282,26 +267,30 @@ int CG(ParMat& A, std::vector<double>& x, std::vector<double>& b,
         }
         alpha = rr_inner / App_inner;
 
-        axpy(alpha, x, p);
+        rocblas_daxpy(A.blas_handle, A.local_rows, &alpha, x, 1, p, 1);
 
         // x_{i+1} = x_i + alpha_i * p_i
         if ((iter % recompute_r) && iter > 0)
         {
-            axpy(-1.0*alpha, r, Ap);
+            alpha *= -1.0;
+            rocblas_daxpy(A.blas_handle, A.local_rows, &alpha,
+                    r, 1, Ap, 1);
         }
         else
         {
-            r = b;
-            spmv(-1.0, A, x, 1.0, r, mpil_comm, sendbuf, recvbuf, 
-                    mpil_spmv_req);
+            HIP_CHECK(hipMemcpy(r, b, A.local_rows*sizeof(double),
+                    hipMemcpyDeviceToDevice));
+            spmv(-1.0, A, x, vec_x, 1.0, r, vec_r, mpil_comm,
+                    sendbuf, recvbuf, vec_recv, mpil_spmv_req);
         }
 
-        next_inner = inner_product(r, r, &local_sum, &global_sum,
-                mpil_comm, mpil_req);
+        next_inner = inner_product(A.blas_handle, A.local_rows, r,
+                r, &local_sum, &global_sum, mpil_comm, mpil_req);
         beta = next_inner / rr_inner;
 
-        scale(beta, p);
-        axpy(1.0, p, r);
+        rocblas_dscal(handle, n, &beta, p, 1);
+        rocblas_daxy(A.blas_handle, A.local_rows, &one, p,
+                1, r, 1);
 
         // Update next inner product
         rr_inner = next_inner;
@@ -321,6 +310,14 @@ int CG(ParMat& A, std::vector<double>& x, std::vector<double>& b,
     }
     MPIL_Info_free(&mpil_info);
     MPIL_Comm_free(&mpil_comm);
+
+    ROCSPARSE_CHECK(rocsparse_destroy_dnvec_descr(vec_r);
+    ROCSPARSE_CHECK(rocsparse_destroy_dnvec_descr(vec_p);
+    ROCSPARSE_CHECK(rocsparse_destroy_dnvec_descr(vec_Ap);
+
+    HIP_CHECK(hipFree(r));
+    HIP_CHECK(hipFree(p));
+    HIP_CHECK(hipFree(Ap));
 
     return iter;
 }
@@ -395,20 +392,33 @@ int main(int argc, char* argv[])
 
 
     // Initialize SpMV Buffers
-    spmv(A.sparse_handle, A.on_proc.descr, 1.0, vec_x,
-            0.0, vec_b, &A.on_proc.buf_size, NULL);
+    double one = 1.0;
+    double zero = 0.0;
+    ROCSPARSE_CHECK(rocsparse_spmv(A.sparsehandle, 
+            rocsparse_operation_none,
+            &one, A.d_on_proc, vec_x, &zero, vec_b,
+            rocsparse_datatype_f64_r,
+            rocsparse_spmv_alg_default,
+            rocsparse_spmv_stage_buffer_size,
+            A.on_proc.buf_size, NULL);
     if (A.on_proc.buf_size)
     {
-        
-        HIP_CHECK(hipMalloc(&A.on_proc.buffer, 
-    spmv(A.sparse_handle, A.off_proc.descr, 1.0, vec_recv, 
-            1.0, vec_b, &A.off_proc.buf_size, NULL);
+        HIP_CHECK(hipMalloc(&A.on_proc.buffer,
+            A.on_proc.buf_size));
+    }
+    ROCSPARSE_CHECK(rocsparse_spmv(A.sparsehandle, 
+            rocsparse_operation_none,
+            &one, A.d_off_proc, vec_recv, &one, vec_b,
+            rocsparse_datatype_f64_r,
+            rocsparse_spmv_alg_default,
+            rocsparse_spmv_stage_buffer_size,
+            A.off_proc.buf_size, NULL); 
+    if (A.off_proc.buf_size)
+    {
+        HIP_CHECK(hipMalloc(&A.off_proc.buffer,
+                A.off_proc.buf_size));
+    }
 
-
-void spmv(rocsparse_handle handle, rocsparse_spmat_descr A,
-            double alpha, roscparse_dnvec_descr x,
-            double beta, rocsparse_dnvec_descr y,
-            size_t* tmp_buffer_size, void** tmp_buffer)
 
     // Set x to random values, b = A*x
     // Will reset x to 0 before each CG
@@ -416,7 +426,8 @@ void spmv(rocsparse_handle handle, rocsparse_spmat_descr A,
     std::uniform_real_distribution<double> dist(0.0, 1.0);
     std::generate(x.begin(), x.end(),
               [&]() { return dist(rng); });
-    spmv(1.0, A, x, 0.0, b, mpil_comm);
+    HIP_CHECK(hipMemcpy(d_x, x.data(), x.size() * sizeof(double));
+    spmv(1.0, A, vec_x, 0.0, vec_b, recv_vec, mpil_comm);
 
     int n_iters;
     int conv_iter;
@@ -569,6 +580,14 @@ void spmv(rocsparse_handle handle, rocsparse_spmat_descr A,
 
     }
     MPIL_Comm_free(&mpil_comm);
+
+    ROCSPARSE_CHECK(rocsparse_destroy_dnvec_descr(vec_x));
+    ROCSPARSE_CHECK(rocsparse_destroy_dnvec_descr(vec_b));
+
+    HIP_CHECK(hipFree(x_d));
+    HIP_CHECK(hipFree(b_d));
+    HIP_CHECK(hipFree(sendbuf));
+    HIP_CHECK(hipFree(recv));
 
     MPI_Finalize();
 }

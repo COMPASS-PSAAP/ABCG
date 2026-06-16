@@ -23,7 +23,7 @@
 #define ROCBLAS_CHECK(cmd)                                           \
   {                                                                  \
     rocblas_status error = cmd;                                      \
-    if (error != rocsparse_status_success) {                         \
+    if (error != rocblas_status_success) {                         \
       fprintf(stderr, "error: '%d' at %s:%d\n",                      \
             (int)error, __FILE__, __LINE__);                         \
       MPI_Abort(MPI_COMM_WORLD, 1);                                  \

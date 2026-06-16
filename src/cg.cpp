@@ -259,7 +259,7 @@ int CG(ParMat& A, double* x, rocsparse_dnvec_descr vec_x,
         spmv(1.0, A, p, vec_p, 0.0, Ap, vec_Ap, mpil_comm,
                 sendbuf, recvbuf, vec_recv, mpil_spmv_req);
         App_inner = inner_product(A.blas_handle, A.local_rows, Ap,
-                p, &local_sum, &globa_sum, mpil_comm, mpil_req);
+                p, &local_sum, &global_sum, mpil_comm, mpil_req);
         if (App_inner < 0.0)
         {
             printf("Indefinite matrix detected in CG! Aborting...\n");
@@ -267,7 +267,7 @@ int CG(ParMat& A, double* x, rocsparse_dnvec_descr vec_x,
         }
         alpha = rr_inner / App_inner;
 
-        rocblas_daxpy(A.blas_handle, A.local_rows, &alpha, x, 1, p, 1);
+        rocblas_daxpy(A.blas_handle, A.local_rows, &alpha, p, 1, x, 1);
 
         // x_{i+1} = x_i + alpha_i * p_i
         if ((iter % recompute_r) && iter > 0)
@@ -288,7 +288,7 @@ int CG(ParMat& A, double* x, rocsparse_dnvec_descr vec_x,
                 r, &local_sum, &global_sum, mpil_comm, mpil_req);
         beta = next_inner / rr_inner;
 
-        rocblas_dscal(handle, n, &beta, p, 1);
+        rocblas_dscal(A.blas_handle, A.local_rows, &beta, p, 1);
         rocblas_daxy(A.blas_handle, A.local_rows, &one, p,
                 1, r, 1);
 

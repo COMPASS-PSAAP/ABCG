@@ -431,14 +431,13 @@ int main(int argc, char* argv[])
             b_d, &local_norm_b, &norm_b, mpil_comm, NULL);
     norm_b = sqrt(norm_b);
 
-/*
     std::vector<NeighborAlltoallvMethod> neighbor_methods = {
-            NEIGHBOR_ALLTOALLV_STANDARD, 
-            NEIGHBOR_ALLTOALLV_LOCALITY
+            NEIGHBOR_ALLTOALLV_GPU_STANDARD, 
+            NEIGHBOR_ALLTOALLV_GPU_LOCALITY
             };
     std::vector<NeighborAlltoallvInitMethod> neighbor_init_methods = {
-            NEIGHBOR_ALLTOALLV_INIT_STANDARD, 
-            NEIGHBOR_ALLTOALLV_INIT_LOCALITY
+            NEIGHBOR_ALLTOALLV_INIT_GPU_STANDARD, 
+            NEIGHBOR_ALLTOALLV_INIT_GPU_LOCALITY
             };
     std::vector<const char*> neighbor_names = {
             "Standard", 
@@ -447,8 +446,9 @@ int main(int argc, char* argv[])
             "Pers Locality"
             };
     std::vector<bool> neighbor_persistent = {false, false, true, true};
-*/
 
+
+/*
    std::vector<NeighborAlltoallvMethod> neighbor_methods = {
         NEIGHBOR_ALLTOALLV_GPU_STANDARD};
     std::vector<NeighborAlltoallvInitMethod> neighbor_init_methods;
@@ -456,7 +456,6 @@ int main(int argc, char* argv[])
         "Standard" };
     std::vector<bool> neighbor_persistent = {false};
 
-/*
     std::vector<AllreduceMethod> methods = {
             ALLREDUCE_PMPI,
             ALLREDUCE_RMA_HIERARCHICAL,
@@ -471,14 +470,14 @@ int main(int argc, char* argv[])
 
     std::vector<AllreduceMethod> methods = {
             ALLREDUCE_PMPI, 
-            ALLREDUCE_GPU_RECURSIVE_DOUBLING, 
-            ALLREDUCE_GPU_DISSEMINATION_LOC, 
-            ALLREDUCE_GPU_DISSEMINATION_ML, 
-            ALLREDUCE_GPU_DISSEMINATION_RADIX,
-            ALLREDUCE_GPU_RECURSIVE_DOUBLING, 
-            ALLREDUCE_GPU_DISSEMINATION_LOC, 
-            ALLREDUCE_GPU_DISSEMINATION_ML, 
-            ALLREDUCE_GPU_DISSEMINATION_RADIX, 
+            ALLREDUCE_CTC_RECURSIVE_DOUBLING, 
+            ALLREDUCE_CTC_DISSEMINATION_LOC, 
+            ALLREDUCE_CTC_DISSEMINATION_ML, 
+            ALLREDUCE_CTC_DISSEMINATION_RADIX,
+            ALLREDUCE_CTC_RECURSIVE_DOUBLING, 
+            ALLREDUCE_CTC_DISSEMINATION_LOC, 
+            ALLREDUCE_CTC_DISSEMINATION_ML, 
+            ALLREDUCE_CTC_DISSEMINATION_RADIX, 
             };
     std::vector<const char*> names = {
             "PMPI", 
@@ -490,8 +489,8 @@ int main(int argc, char* argv[])
             "MPIL NA Pers", 
             "MPIL LA Pers", 
             "MPIL RADIX Pers",
-            "MPIL RMA Hier Pers", 
-            "MPIL RMA Hier EB Pers", 
+            //"MPIL RMA Hier Pers", 
+            //"MPIL RMA Hier EB Pers", 
             //"MPIL RMA ML Pers", 
             //"MPIL RMA ML EB Pers"
             };
@@ -505,8 +504,8 @@ int main(int argc, char* argv[])
             true,
             true,
             true,
-            true,
-            true,
+            //true,
+            //true,
             //true,
             //true
             };
@@ -567,7 +566,6 @@ int main(int argc, char* argv[])
         }
 
     }
-    MPIL_Comm_free(&mpil_comm);
 
     ROCSPARSE_CHECK(rocsparse_destroy_dnvec_descr(vec_x));
     ROCSPARSE_CHECK(rocsparse_destroy_dnvec_descr(vec_b));
@@ -579,6 +577,8 @@ int main(int argc, char* argv[])
     HIP_CHECK(hipFree(r_d));
     HIP_CHECK(hipFree(sendbuf));
     HIP_CHECK(hipFree(recvbuf));
+
+    MPIL_Comm_free(&mpil_comm);
 
     MPI_Finalize();
 }

@@ -2,6 +2,9 @@
 #include "par_binary_IO.hpp"
 #include "locality_aware.h"
 #include <math.h>
+#include <random>
+
+#include "utils.hpp"
 
 // Serial SpMV b = alpha*A*x + beta*b
 void spmv(double alpha, Mat& A, std::vector<double>& x,
@@ -21,6 +24,31 @@ void spmv(double alpha, Mat& A, std::vector<double>& x,
         }
         b[i] = alpha * sum + beta * b[i];
     }
+}
+
+
+__global__ void pack(const double* __restrict__ x,
+                    const int* __restrict__ idx,
+                    double* __restrict__ packed_buf,
+                    int n)
+{
+    int i = blockIdx.x*blockDim.x + threadIdx.x;
+    if (i < n) packed[i] = x[idx[i]];
+}
+
+
+// Parallel SpMV b = alpha*A*x + beta*b 
+void spmv(rocsparse_handle handle, rocsparse_spmat_descr A,
+            double alpha, roscparse_dnvec_descr x, 
+            double beta, rocsparse_dnvec_descr y,
+            size_t* tmp_buffer_size, void** tmp_buffer)
+{
+    ROCSPARSE_CHECK(rocsparse_spmv(handle, rocsparse_operation_none,
+            &alpha, A, x, &beta, y, 
+            rocsparse_datatype_f64_r,
+            rocsparse_spmv_alg_default,
+            rocsparse_spmv_stage_buffer_size,
+            tmp_buffer_size, tmp_buffer);
 }
 
 void spmv(double alpha, ParMat& A, std::vector<double>& x, 
@@ -44,20 +72,29 @@ void spmv(double alpha, ParMat& A, std::vector<double>& x,
             mpil_info,
             &mpil_topo);
 
-    // Pack Send Buffer
-    for (int i = 0; i < A.send_comm.size_msgs; i++)
-        sendbuf[i] = x[A.send_comm.idx[i]];
+    // Launch Pack Kernel -- Pack Send Buffer
+    if (A.send_comm.size_msgs)
+    {
+        dim3 threads(256);
+        dim3 blocks((A.send_comm.size_msgs + threads.x - 1) / threads.x);
+        pack<<<blocks, threads, 0, 0>>>(x_d, A.send_comm.idx_d,
+                sendbuf_d, A.send_comm.size_msgs);
+        HIP_CHECK(hipMemcpy(sendbuf_h, sendbuf_d, A.send_comm.size_msgs * sizeof(double),
+                hipMemcpyDeviceToHost));
+    }
 
-    MPIL_Neighbor_alltoallv_topo(sendbuf.data(), 
+    MPIL_Neighbor_alltoallv_topo(sendbuf_d
             A.send_comm.counts.data(),
             A.send_comm.ptr.data(),
             MPI_DOUBLE,
-            recvbuf.data(),
+            recvbuf_d
             A.recv_comm.counts.data(),
             A.recv_comm.ptr.data(),
             MPI_DOUBLE,
             mpil_topo,
             mpil_comm);
+
+    spmv(
 
     spmv(alpha, A.on_proc, x, beta, b);
 
@@ -67,8 +104,6 @@ void spmv(double alpha, ParMat& A, std::vector<double>& x,
     MPIL_Topo_free(&mpil_topo);
 }
 
-
-// Parallel SpMV b = alpha*A*x + beta*b 
 void spmv(double alpha, ParMat& A, std::vector<double>& x, 
         double beta, std::vector<double>& b, MPIL_Comm* mpil_comm,
         std::vector<double>& sendbuf, std::vector<double>& recvbuf,
@@ -79,15 +114,27 @@ void spmv(double alpha, ParMat& A, std::vector<double>& x,
         int proc, start, end;
         int tag = 0;
 
-        for (int i = 0; i < A.send_comm.size_msgs; i++)
-            sendbuf[i] = x[A.send_comm.idx[i]];
+        // Launch Pack Kernel -- Pack Send Buffer
+        if (A.send_comm.size_msgs)
+        {
+            dim3 threads(256);
+            dim3 blocks((A.send_comm.size_msgs + threads.x - 1) / threads.x);
+            pack<<<blocks, threads, 0, 0>>>(x_d, A.send_comm.idx_d, 
+                    sendbuf_d, A.send_comm.size_msgs);
+            HIP_CHECK(hipMemcpy(sendbuf_h, sendbuf_d, A.send_comm.size_msgs * sizeof(double),
+                    hipMemcpyDeviceToHost));
+        }
+
         MPIL_Start(req);
 
         spmv(alpha, A.on_proc, x, beta, b);
+        spmv(A.sparse_handle, A.on_proc.descr, alpha, A.descr_x, 
+                beta, A.descr_b, A.on_proc.buf_s, A.on_proc.buf);
 
         MPIL_Wait(req, MPI_STATUS_IGNORE);
 
         spmv(alpha, A.off_proc, recvbuf, 1.0, b);
+        spmv(A.handle, A.off_proc.descr, 
     }
     else
     {
@@ -290,11 +337,7 @@ int main(int argc, char* argv[])
     MPIL_Comm_init(&mpil_comm, MPI_COMM_WORLD);
 
     MPIL_Comm_topo_init(mpil_comm);
-    int ppn;
-    MPIL_Comm_local_size(mpil_comm, &ppn);
-
-    // 4 NUMA regions per node, aggregate by NUMA
-    MPIL_Comm_update_locality(mpil_comm, ppn / 8);
+    MPIL_Comm_device_init(mpil_comm);
 
     const char* filename = "Dubcova2.pm";
     if (argc > 1)
@@ -320,13 +363,59 @@ int main(int argc, char* argv[])
     if (rank == 0) printf("Form comm: %e\n", t0);
     fflush(stdout);
 
+    copy_to_device(A);
+
     std::vector<double> x(A.local_cols);
     std::vector<double> b(A.local_rows);
+    double *x_d, *b_d;
+    HIP_CHECK(hipMalloc((void**)&x_d, A.local_cols*sizeof(double)));
+    HIP_CHECK(hipMalloc((void**)&b_d, A.local_rows*sizeof(double)));
 
-    // Set b to random values, x to 0
-    srand(time(NULL) + rank);
-    std::generate(x.begin(), x.end(), 
-            [&](){ return (double)(rand()) / RAND_MAX; });
+    double* sendbuf = NULL;
+    if (A.send_comm.size_msgs)
+    {
+        HIP_CHECK(hipMalloc((void**)&sendbuf, 
+                A.send_comm.size_msgs*sizeof(double)));
+    }
+
+    double* recvbuf = NULL;
+    if (A.recv_comm.size_msgs)
+    {
+        HIP_CHECK(hipMalloc((void**)&recvbuf,
+                A.recv_comm.size_msgs*sizeof(double)));
+    }
+
+    rocsparse_dnvec_descr vec_x, vec_b, vec_recv;
+    ROCSPARSE_CHECK(rocsparse_create_dnvec_descr(&vec_x, A.local_cols, x_d, 
+            rocsparse_datatype_f64_r));
+    ROCSPARSE_CHECK(rocsparse_create_dnvec_descr(&vec_b, A.local_rows, b_d,
+            rocsparse_datatype_f64_r));
+    ROCSPARSE_CHECK(rocsparse_create_dnvec_descr(&vec_recv, A.recv_comm.size_msgs, 
+                recvbuf, rocsparse_datatype_f64_r));
+
+
+    // Initialize SpMV Buffers
+    spmv(A.sparse_handle, A.on_proc.descr, 1.0, vec_x,
+            0.0, vec_b, &A.on_proc.buf_size, NULL);
+    if (A.on_proc.buf_size)
+    {
+        
+        HIP_CHECK(hipMalloc(&A.on_proc.buffer, 
+    spmv(A.sparse_handle, A.off_proc.descr, 1.0, vec_recv, 
+            1.0, vec_b, &A.off_proc.buf_size, NULL);
+
+
+void spmv(rocsparse_handle handle, rocsparse_spmat_descr A,
+            double alpha, roscparse_dnvec_descr x,
+            double beta, rocsparse_dnvec_descr y,
+            size_t* tmp_buffer_size, void** tmp_buffer)
+
+    // Set x to random values, b = A*x
+    // Will reset x to 0 before each CG
+    std::mt19937 rng(rank + 12345);
+    std::uniform_real_distribution<double> dist(0.0, 1.0);
+    std::generate(x.begin(), x.end(),
+              [&]() { return dist(rng); });
     spmv(1.0, A, x, 0.0, b, mpil_comm);
 
     int n_iters;
@@ -356,6 +445,27 @@ int main(int argc, char* argv[])
             "Pers Locality"
             };
     std::vector<bool> neighbor_persistent = {false, false, true, true};
+
+/*
+    std::vector<NeighborAlltoallvMethod> neighbor_methods = {
+        NEIGHBOR_ALLTOALLV_STANDARD};
+    std::vector<NeighborAlltoallvInitMethod> neighbor_init_methods;
+    std::vector<const char*> neighbor_names = {
+        "Standard" };
+    std::vector<bool> neighbor_persistent = {false};
+
+
+    std::vector<AllreduceMethod> methods = {
+            ALLREDUCE_PMPI,
+            ALLREDUCE_RMA_HIERARCHICAL,
+            ALLREDUCE_RMA_HIERARCHICAL_EARLYBIRD};
+    std::vector<const char*> names = {
+            "PMPI",
+            "MPIL RMA Hier Pers", 
+            "MPIL RMA Hier EB Pers"};
+    std::vector<bool> persistent = {false, true, true};
+
+*/
 
     std::vector<AllreduceMethod> methods = {
             ALLREDUCE_PMPI, 

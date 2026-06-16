@@ -5,6 +5,22 @@
 
 #include <vector>
 
+#include "utils.hpp"
+
+struct GPUMat
+{
+    int* rowptr;
+    int* col_idx;
+    double* data;
+
+    int n_rows;
+    int n_cols;
+    int nnz;
+    rocsparse_spmat_descr descr;
+    size_t buf_size;
+    void* buffer;
+};
+
 struct Mat
 {
     std::vector<int> rowptr;
@@ -24,12 +40,16 @@ struct Comm
     std::vector<int> counts;
     std::vector<int> idx;
     std::vector<MPI_Request> req;
+
+    void* d_idx;
 };
 
 struct ParMat
 {
     Mat on_proc;
     Mat off_proc;
+    GPUMat d_on_proc;
+    GPUMat d_off_proc;
     int global_rows;
     int global_cols;
     int local_rows;
@@ -41,6 +61,9 @@ struct ParMat
     Comm send_comm;
     Comm recv_comm;
     MPI_Comm dist_graph_comm;
+
+    rocsparse_handle sparse_handle;
+    rocblas_handle blas_handle;
 };
 
 void form_recv_comm(ParMat& A)
@@ -185,5 +208,66 @@ void form_comm(ParMat& A)
     form_send_comm_standard(A);
 }
 
+
+void copy_to_device(const Mat& h, GPUMat& d)
+{
+    d.n_rows = h.n_rows;
+    d.n_cols = h.n_cols;
+    d.nnz = h.nnz;
+    HIP_CHECK(hipMalloc(&d.rowptr, (d.n_rows+1) * sizeof(int));
+    HIP_CHECK(hipMalloc(&d.col_idx, d.nnz * sizeof(int));
+    HIP_CHECK(hipMalloc(&d.data, d.nnz*sizeof(double));
+    HIP_CHECK(hipMemcpy(d.rowptr, h.rowptr.data(), (d.n_rows+1)*sizeof(int),
+            hipMemcpyHostToDevice));
+    HIP_CHECK(hipMemcpy(d.col_idx, h.col_idx.data(), d.nnz*sizeof(int),
+            hipMemcpyHostToDevice));
+    HIP_CHECK(hipMemcpy(d.data, h.data.data(), d.nnz*sizeof(double),
+            hipMemcpyHostToDevice));
+
+    ROCSPARSE_CHECK(rocsparse_create_csr_descr(&d.descr,
+            d.n_rows, d.n_cols, d.nnz,
+            d.rowptr, d.col_idx, d.data,
+            rocsparse_indextype_i32, rocsparse_indextype_i32,
+            rocsparse_index_base_zero, rocsparse_datatype_f64_r));
+}
+
+void copy_to_device(const ParMat& A)
+{
+    ROCSPARSE_CHECK(rocsparse_create_handle(&A.sparse_handle);
+    ROCBLAS_CHECK(rocblas_create_handle(&A.blas_handle);
+
+    copy_to_device(A.on_proc, A.d_on_proc);
+    copy_to_device(A.off_proc, A.d_off_proc);
+
+    if (A.send_comm.size_msgs)
+    {
+        HIP_CHECK(hipMalloc(&A.send_comm.d_idx, A.send_comm.size_msgs * sizeof(int));
+        HIP_CHECK(hipMemcpy(A.send_comm.d_idx, A.send_comm.idx.data(),
+                A.send_comm.size_msgs*sizeof(int), hipMemcpyHostToDevice));
+    }
+
+}
+
+void free_gpu_mat(GPUMat& d)
+{
+    ROCSPARSE_CHECK(rocsparse_destroy_spmat_descr(d.descr));
+    HIP_CHECK(hipFree(d.rowptr));
+    HIP_CHECK(hipFree(d.col_idx));
+    HIP_CHECK(hipFree(d.data));
+}
+
+void free_mat(ParMat& A)
+{
+    free_gpu_mat(A.d_on_proc);
+    free_gpu_mat(A.d_off_proc);
+
+    if (A.send_comm.size_msgs)
+    {
+        HIP_CHECK(hipFree(A.send_comm.d_idx));
+    }
+
+    ROCSPARSE_CHECK(rocsparse_destroy_handle(A.sparse_handle));
+    ROCBLAS_CHECK(rocblas_destroy_handle(A.blas_handle));
+}
 
 #endif

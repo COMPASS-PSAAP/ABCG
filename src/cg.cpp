@@ -27,17 +27,15 @@ void spmv(rocsparse_handle handle, rocsparse_spmat_descr A,
             rocsparse_datatype_f64_r,
             rocsparse_spmv_alg_default,
             rocsparse_spmv_stage_buffer_compute,
-            &tmp_buffer_size, tmp_buffer);
+            &tmp_buffer_size, tmp_buffer));
 }
 
-void spmv(double alpha, ParMat& A, double* x_d, cusparse_dnvec_descr vec_x, 
-        double beta, double* b_d, cusparse_dnvec_descr vec_b, MPIL_Comm* mpil_comm,
-        double* sendbuf, double* recvbuf, cusparse_dnvec_descr vec_recv)
+void spmv(double alpha, ParMat& A, double* x_d, rocsparse_dnvec_descr vec_x, 
+        double beta, double* b_d, rocsparse_dnvec_descr vec_b, MPIL_Comm* mpil_comm,
+        double* sendbuf, double* recvbuf, rocsparse_dnvec_descr vec_recv)
 {
     int proc, start, end;
     int tag = 0;
-    std::vector<double> recvbuf(A.recv_comm.size_msgs);
-    std::vector<double> sendbuf(A.send_comm.size_msgs);
 
     MPIL_Info* mpil_info;
     MPIL_Info_init(&mpil_info);
@@ -61,11 +59,11 @@ void spmv(double alpha, ParMat& A, double* x_d, cusparse_dnvec_descr vec_x,
                 sendbuf, A.send_comm.size_msgs);
     }
 
-    MPIL_Neighbor_alltoallv_topo(sendbuf
+    MPIL_Neighbor_alltoallv_topo(sendbuf,
             A.send_comm.counts.data(),
             A.send_comm.ptr.data(),
             MPI_DOUBLE,
-            recvbuf
+            recvbuf,
             A.recv_comm.counts.data(),
             A.recv_comm.ptr.data(),
             MPI_DOUBLE,
@@ -82,9 +80,9 @@ void spmv(double alpha, ParMat& A, double* x_d, cusparse_dnvec_descr vec_x,
     MPIL_Topo_free(&mpil_topo);
 }
 
-void spmv(double alpha, ParMat& A, double* x_d, cusparse_dnvec_descr vec_x,
-        double beta, double* b_d, cusparse_dnvec_descr vec_b, MPIL_Comm* mpil_comm,
-        double* sendbuf, double* recvbuf, cusparse_dnvec_descr vec_recv,
+void spmv(double alpha, ParMat& A, double* x_d, rocsparse_dnvec_descr vec_x,
+        double beta, double* b_d, rocsparse_dnvec_descr vec_b, MPIL_Comm* mpil_comm,
+        double* sendbuf, double* recvbuf, rocsparse_dnvec_descr vec_recv,
         MPIL_Request* req)
 {
     if (req != NULL)
@@ -129,7 +127,7 @@ void scale(rocblas_handle handle, int n, double alpha, double* x_d)
     rocblas_dscal(handle, n, &alpha, x_d, 1);
 }
 
-double inner_product(rocblos_handle handle, int n, double* a_d, double* b_d,
+double inner_product(rocblas_handle handle, int n, double* a_d, double* b_d,
             double* local_sum_ptr, double* global_sum_ptr,
             MPIL_Comm* mpil_comm, MPIL_Request* mpil_req)
 {
@@ -162,9 +160,9 @@ int CG(ParMat& A, double* x, rocsparse_dnvec_descr vec_x,
 
     // CG Variables
     double *r, *p, *Ap;
-    HIP_CHECK(hipMalloc(void**)&r, A.local_rows*sizeof(double));
-    HIP_CHECK(hipMalloc(void**)&p, A.local_rows*sizeof(double));
-    HIP_CHECK(hipMalloc(void**)&Ap, A.local_rows*sizeof(double));
+    HIP_CHECK(hipMalloc((void**)&r, A.local_rows*sizeof(double)));
+    HIP_CHECK(hipMalloc((void**)&p, A.local_rows*sizeof(double)));
+    HIP_CHECK(hipMalloc((void**)&Ap, A.local_rows*sizeof(double)));
 
     rocsparse_dnvec_descr vec_r, vec_p, vec_Ap;
     ROCSPARSE_CHECK(rocsparse_create_dnvec_descr(&vec_r, A.local_rows,
@@ -198,12 +196,12 @@ int CG(ParMat& A, double* x, rocsparse_dnvec_descr vec_x,
         std::vector<long> global_send_idx(A.send_comm.size_msgs);
         for (int i = 0; i < A.send_comm.size_msgs; i++)
             global_send_idx[i] = A.send_comm.idx[i] + A.first_row;
-        MPIL_Neighbor_alltoallv_init_ext_topo(sendbuf.data(), 
+        MPIL_Neighbor_alltoallv_init_ext_topo(sendbuf, 
                 A.send_comm.counts.data(),
                 A.send_comm.ptr.data(),
                 global_send_idx.data(),
                 MPI_DOUBLE,
-                recvbuf.data(),
+                recvbuf,
                 A.recv_comm.counts.data(),
                 A.recv_comm.ptr.data(),
                 A.off_proc_columns.data(),
@@ -234,10 +232,11 @@ int CG(ParMat& A, double* x, rocsparse_dnvec_descr vec_x,
             sendbuf, recvbuf, vec_recv, mpil_spmv_req);
 
     // p0 = r0
-    p = r;
+    HIP_CHECK(hipMemcpy(p, r, A.local_rows*sizeof(double),
+            hipMemcpyDeviceToDevice));
 
     // Find initial (r, r) and residual
-    rr_inner = inner_product(A.dblas_handle, A.local_rows, r, 
+    rr_inner = inner_product(A.blas_handle, A.local_rows, r, 
             r, &local_sum, &global_sum, mpil_comm, mpil_req);
     norm_r = sqrt(rr_inner);
     res.push_back(norm_r);
@@ -274,7 +273,7 @@ int CG(ParMat& A, double* x, rocsparse_dnvec_descr vec_x,
         {
             alpha *= -1.0;
             rocblas_daxpy(A.blas_handle, A.local_rows, &alpha,
-                    r, 1, Ap, 1);
+                    Ap, 1, r, 1);
         }
         else
         {
@@ -289,8 +288,8 @@ int CG(ParMat& A, double* x, rocsparse_dnvec_descr vec_x,
         beta = next_inner / rr_inner;
 
         rocblas_dscal(A.blas_handle, A.local_rows, &beta, p, 1);
-        rocblas_daxy(A.blas_handle, A.local_rows, &one, p,
-                1, r, 1);
+        rocblas_daxpy(A.blas_handle, A.local_rows, &one, r,
+                1, p, 1);
 
         // Update next inner product
         rr_inner = next_inner;
@@ -311,9 +310,9 @@ int CG(ParMat& A, double* x, rocsparse_dnvec_descr vec_x,
     MPIL_Info_free(&mpil_info);
     MPIL_Comm_free(&mpil_comm);
 
-    ROCSPARSE_CHECK(rocsparse_destroy_dnvec_descr(vec_r);
-    ROCSPARSE_CHECK(rocsparse_destroy_dnvec_descr(vec_p);
-    ROCSPARSE_CHECK(rocsparse_destroy_dnvec_descr(vec_Ap);
+    ROCSPARSE_CHECK(rocsparse_destroy_dnvec_descr(vec_r));
+    ROCSPARSE_CHECK(rocsparse_destroy_dnvec_descr(vec_p));
+    ROCSPARSE_CHECK(rocsparse_destroy_dnvec_descr(vec_Ap));
 
     HIP_CHECK(hipFree(r));
     HIP_CHECK(hipFree(p));
@@ -364,9 +363,10 @@ int main(int argc, char* argv[])
 
     std::vector<double> x(A.local_cols);
     std::vector<double> b(A.local_rows);
-    double *x_d, *b_d;
+    double *x_d, *b_d, *r_d;
     HIP_CHECK(hipMalloc((void**)&x_d, A.local_cols*sizeof(double)));
     HIP_CHECK(hipMalloc((void**)&b_d, A.local_rows*sizeof(double)));
+    HIP_CHECK(hipMalloc((void**)&r_d, A.local_rows*sizeof(double)));
 
     double* sendbuf = NULL;
     if (A.send_comm.size_msgs)
@@ -394,25 +394,25 @@ int main(int argc, char* argv[])
     // Initialize SpMV Buffers
     double one = 1.0;
     double zero = 0.0;
-    ROCSPARSE_CHECK(rocsparse_spmv(A.sparsehandle, 
+    ROCSPARSE_CHECK(rocsparse_spmv(A.sparse_handle, 
             rocsparse_operation_none,
             &one, A.d_on_proc, vec_x, &zero, vec_b,
             rocsparse_datatype_f64_r,
             rocsparse_spmv_alg_default,
             rocsparse_spmv_stage_buffer_size,
-            A.on_proc.buf_size, NULL);
+            A.on_proc.buf_size, NULL));
     if (A.on_proc.buf_size)
     {
         HIP_CHECK(hipMalloc(&A.on_proc.buffer,
             A.on_proc.buf_size));
     }
-    ROCSPARSE_CHECK(rocsparse_spmv(A.sparsehandle, 
+    ROCSPARSE_CHECK(rocsparse_spmv(A.sparse_handle, 
             rocsparse_operation_none,
             &one, A.d_off_proc, vec_recv, &one, vec_b,
             rocsparse_datatype_f64_r,
             rocsparse_spmv_alg_default,
             rocsparse_spmv_stage_buffer_size,
-            A.off_proc.buf_size, NULL); 
+            A.off_proc.buf_size, NULL)); 
     if (A.off_proc.buf_size)
     {
         HIP_CHECK(hipMalloc(&A.off_proc.buffer,
@@ -426,19 +426,17 @@ int main(int argc, char* argv[])
     std::uniform_real_distribution<double> dist(0.0, 1.0);
     std::generate(x.begin(), x.end(),
               [&]() { return dist(rng); });
-    HIP_CHECK(hipMemcpy(d_x, x.data(), x.size() * sizeof(double));
-    spmv(1.0, A, vec_x, 0.0, vec_b, recv_vec, mpil_comm);
+    HIP_CHECK(hipMemcpy(x_d, x.data(), x.size() * sizeof(double)));
+    spmv(1.0, A, x_d, vec_x, 0.0, b_d, vec_b, mpil_comm,
+            sendbuf, recvbuf, vec_recv);
 
     int n_iters;
     int conv_iter;
     std::vector<double> r;
     double sum;
-    double norm_b;
-    norm_b = 0;
-    for (int i = 0; i < b.size(); i++)
-        norm_b += b[i] * b[i];
-    MPI_Allreduce(MPI_IN_PLACE, &norm_b, 1, MPI_DOUBLE, MPI_SUM,
-            MPI_COMM_WORLD);
+    double local_norm_b, norm_b;
+    norm_b = inner_product(A.blas_handle, A.local_rows, b_d,
+            b_d, &local_norm_b, &norm_b, mpil_comm, NULL);
     norm_b = sqrt(norm_b);
 
     std::vector<NeighborAlltoallvMethod> neighbor_methods = {
@@ -543,16 +541,16 @@ int main(int argc, char* argv[])
             MPIL_Set_allreduce_algorithm(methods[idx]);
             MPI_Barrier(MPI_COMM_WORLD);
             t0 = MPI_Wtime();
-            std::fill(x.begin(), x.end(), 0);
-            conv_iter = CG(A, x, b, persistent_spmv, persistent[idx]);
+            hipMemset(x_d, 0, A.local_rows*sizeof(double));
+            conv_iter = CG(A, x_d, vec_x, b_d, vec_b, sendbuf,
+                    recvbuf, vec_recv, persistent_spmv, persistent[idx]);
             tfinal = (MPI_Wtime() - t0);
-            r = b;
-            spmv(-1.0, A, x, 1.0, r, mpil_comm);
-            sum = 0;
-            for (int i = 0; i < r.size(); i++)
-                sum += r[i] * r[i];
-            MPI_Allreduce(MPI_IN_PLACE, &sum, 1, MPI_DOUBLE, MPI_SUM,
-                    MPI_COMM_WORLD);
+            hipMemcpy(r_d, b_d, A.local_rows*sizeof(double),
+                    hipMemcpyDeviceToDevice);
+            spmv(-1.0, A, x_d, vec_x, 0.0, r_d, vec_r, mpil_comm,
+                    sendbuf, recvbuf, vec_recv);
+            sum = inner_product(A.blas_handle, A.local_rows, r_d,
+                    r_d, &local_norm_b, &sum, mpil_comm, NULL);
             if (rank == 0) printf("CG + %s: %d iter, norm %e\n", 
                     names[idx], conv_iter, sqrt(sum) / norm_b);
 
@@ -567,8 +565,9 @@ int main(int argc, char* argv[])
                 t0 = MPI_Wtime();
                 for (int i = 0; i < n_iters; i++)
                 {
-                    std::fill(x.begin(), x.end(), 0);
-                    CG(A, x, b, persistent_spmv, persistent[idx]);
+                    hipMemset(x_d, 0, A.local_rows*sizeof(double));
+                    CG(A, x_d, vec_x, b_d, vec_b, sendbuf, recvbuf,
+                            vec_recv, persistent_spmv, persistent[idx]);
                 }
                 tfinal = (MPI_Wtime() - t0) / n_iters;
                 MPI_Allreduce(&tfinal, &t0, 1, MPI_DOUBLE, MPI_MAX, 
@@ -583,11 +582,13 @@ int main(int argc, char* argv[])
 
     ROCSPARSE_CHECK(rocsparse_destroy_dnvec_descr(vec_x));
     ROCSPARSE_CHECK(rocsparse_destroy_dnvec_descr(vec_b));
+    ROCSPARSE_CHECK(rocsparse_destroy_dnvec_descr(vec_recv));
 
     HIP_CHECK(hipFree(x_d));
     HIP_CHECK(hipFree(b_d));
+    HIP_CHECK(hipFree(r_d));
     HIP_CHECK(hipFree(sendbuf));
-    HIP_CHECK(hipFree(recv));
+    HIP_CHECK(hipFree(recvbuf));
 
     MPI_Finalize();
 }

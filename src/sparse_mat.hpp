@@ -214,9 +214,9 @@ void copy_to_device(const Mat& h, GPUMat& d)
     d.n_rows = h.n_rows;
     d.n_cols = h.n_cols;
     d.nnz = h.nnz;
-    HIP_CHECK(hipMalloc(&d.rowptr, (d.n_rows+1) * sizeof(int));
-    HIP_CHECK(hipMalloc(&d.col_idx, d.nnz * sizeof(int));
-    HIP_CHECK(hipMalloc(&d.data, d.nnz*sizeof(double));
+    HIP_CHECK(hipMalloc(&d.rowptr, (d.n_rows+1) * sizeof(int)));
+    HIP_CHECK(hipMalloc(&d.col_idx, d.nnz * sizeof(int)));
+    HIP_CHECK(hipMalloc(&d.data, d.nnz*sizeof(double)));
     HIP_CHECK(hipMemcpy(d.rowptr, h.rowptr.data(), (d.n_rows+1)*sizeof(int),
             hipMemcpyHostToDevice));
     HIP_CHECK(hipMemcpy(d.col_idx, h.col_idx.data(), d.nnz*sizeof(int),
@@ -231,17 +231,17 @@ void copy_to_device(const Mat& h, GPUMat& d)
             rocsparse_index_base_zero, rocsparse_datatype_f64_r));
 }
 
-void copy_to_device(const ParMat& A)
+void copy_to_device(ParMat& A)
 {
-    ROCSPARSE_CHECK(rocsparse_create_handle(&A.sparse_handle);
-    ROCBLAS_CHECK(rocblas_create_handle(&A.blas_handle);
+    ROCSPARSE_CHECK(rocsparse_create_handle(&A.sparse_handle));
+    ROCBLAS_CHECK(rocblas_create_handle(&A.blas_handle));
 
     copy_to_device(A.on_proc, A.d_on_proc);
     copy_to_device(A.off_proc, A.d_off_proc);
 
     if (A.send_comm.size_msgs)
     {
-        HIP_CHECK(hipMalloc(&A.send_comm.d_idx, A.send_comm.size_msgs * sizeof(int));
+        HIP_CHECK(hipMalloc(&A.send_comm.d_idx, A.send_comm.size_msgs * sizeof(int)));
         HIP_CHECK(hipMemcpy(A.send_comm.d_idx, A.send_comm.idx.data(),
                 A.send_comm.size_msgs*sizeof(int), hipMemcpyHostToDevice));
     }

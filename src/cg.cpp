@@ -26,7 +26,7 @@ void spmv(rocsparse_handle handle, rocsparse_spmat_descr A,
             &alpha, A, x, &beta, y, 
             rocsparse_datatype_f64_r,
             rocsparse_spmv_alg_default,
-            rocsparse_spmv_stage_buffer_compute,
+            rocsparse_spmv_stage_compute,
             &tmp_buffer_size, tmp_buffer));
 }
 
@@ -55,7 +55,7 @@ void spmv(double alpha, ParMat& A, double* x_d, rocsparse_dnvec_descr vec_x,
     {
         dim3 threads(256);
         dim3 blocks((A.send_comm.size_msgs + threads.x - 1) / threads.x);
-        pack<<<blocks, threads, 0, 0>>>(x_d, A.send_comm.d_idx,
+        pack<<<blocks, threads, 0, 0>>>(x_d, (const int*)A.send_comm.d_idx,
                 sendbuf, A.send_comm.size_msgs);
     }
 
@@ -95,7 +95,7 @@ void spmv(double alpha, ParMat& A, double* x_d, rocsparse_dnvec_descr vec_x,
         {
             dim3 threads(256);
             dim3 blocks((A.send_comm.size_msgs + threads.x - 1) / threads.x);
-            pack<<<blocks, threads, 0, 0>>>(x_d, A.send_comm.d_idx, 
+            pack<<<blocks, threads, 0, 0>>>(x_d, (const int*)A.send_comm.d_idx, 
                     sendbuf, A.send_comm.size_msgs);
         }
 
@@ -120,7 +120,7 @@ double inner_product(rocblas_handle handle, int n, double* a_d, double* b_d,
             double* local_sum_ptr, double* global_sum_ptr,
             MPIL_Comm* mpil_comm, MPIL_Request* mpil_req)
 {
-    rocblas_dot(handle, n, a_d, 1, b_d, 1, local_sum_ptr);
+    rocblas_ddot(handle, n, a_d, 1, b_d, 1, local_sum_ptr);
 
     if (mpil_req == NULL)
     {
@@ -391,11 +391,11 @@ int main(int argc, char* argv[])
             rocsparse_datatype_f64_r,
             rocsparse_spmv_alg_default,
             rocsparse_spmv_stage_buffer_size,
-            A.on_proc.buf_size, NULL));
-    if (A.on_proc.buf_size)
+            &A.d_on_proc.buf_size, NULL));
+    if (A.d_on_proc.buf_size)
     {
-        HIP_CHECK(hipMalloc(&A.on_proc.buffer,
-            A.on_proc.buf_size));
+        HIP_CHECK(hipMalloc(&A.d_on_proc.buffer,
+            A.d_on_proc.buf_size));
     }
     ROCSPARSE_CHECK(rocsparse_spmv(A.sparse_handle, 
             rocsparse_operation_none,
@@ -403,11 +403,11 @@ int main(int argc, char* argv[])
             rocsparse_datatype_f64_r,
             rocsparse_spmv_alg_default,
             rocsparse_spmv_stage_buffer_size,
-            A.off_proc.buf_size, NULL)); 
-    if (A.off_proc.buf_size)
+            &A.d_off_proc.buf_size, NULL)); 
+    if (A.d_off_proc.buf_size)
     {
-        HIP_CHECK(hipMalloc(&A.off_proc.buffer,
-                A.off_proc.buf_size));
+        HIP_CHECK(hipMalloc(&A.d_off_proc.buffer,
+                A.d_off_proc.buf_size));
     }
 
 
@@ -431,6 +431,7 @@ int main(int argc, char* argv[])
             b_d, &local_norm_b, &norm_b, mpil_comm, NULL);
     norm_b = sqrt(norm_b);
 
+/*
     std::vector<NeighborAlltoallvMethod> neighbor_methods = {
             NEIGHBOR_ALLTOALLV_STANDARD, 
             NEIGHBOR_ALLTOALLV_LOCALITY
@@ -446,16 +447,16 @@ int main(int argc, char* argv[])
             "Pers Locality"
             };
     std::vector<bool> neighbor_persistent = {false, false, true, true};
+*/
 
-/*
-    std::vector<NeighborAlltoallvMethod> neighbor_methods = {
-        NEIGHBOR_ALLTOALLV_STANDARD};
+   std::vector<NeighborAlltoallvMethod> neighbor_methods = {
+        NEIGHBOR_ALLTOALLV_GPU_STANDARD};
     std::vector<NeighborAlltoallvInitMethod> neighbor_init_methods;
     std::vector<const char*> neighbor_names = {
         "Standard" };
     std::vector<bool> neighbor_persistent = {false};
 
-
+/*
     std::vector<AllreduceMethod> methods = {
             ALLREDUCE_PMPI,
             ALLREDUCE_RMA_HIERARCHICAL,
@@ -470,18 +471,14 @@ int main(int argc, char* argv[])
 
     std::vector<AllreduceMethod> methods = {
             ALLREDUCE_PMPI, 
-            ALLREDUCE_RECURSIVE_DOUBLING, 
-            ALLREDUCE_DISSEMINATION_LOC, 
-            ALLREDUCE_DISSEMINATION_ML, 
-            ALLREDUCE_DISSEMINATION_RADIX,
-            ALLREDUCE_RECURSIVE_DOUBLING, 
-            ALLREDUCE_DISSEMINATION_LOC, 
-            ALLREDUCE_DISSEMINATION_ML, 
-            ALLREDUCE_DISSEMINATION_RADIX, 
-            ALLREDUCE_RMA_HIERARCHICAL,
-            ALLREDUCE_RMA_HIERARCHICAL_EARLYBIRD, 
-            //ALLREDUCE_RMA_MULTILEADER,
-            //ALLREDUCE_RMA_MULTILEADER_EARLYBIRD
+            ALLREDUCE_GPU_RECURSIVE_DOUBLING, 
+            ALLREDUCE_GPU_DISSEMINATION_LOC, 
+            ALLREDUCE_GPU_DISSEMINATION_ML, 
+            ALLREDUCE_GPU_DISSEMINATION_RADIX,
+            ALLREDUCE_GPU_RECURSIVE_DOUBLING, 
+            ALLREDUCE_GPU_DISSEMINATION_LOC, 
+            ALLREDUCE_GPU_DISSEMINATION_ML, 
+            ALLREDUCE_GPU_DISSEMINATION_RADIX, 
             };
     std::vector<const char*> names = {
             "PMPI", 

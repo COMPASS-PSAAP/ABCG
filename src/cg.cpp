@@ -70,10 +70,10 @@ void spmv(double alpha, ParMat& A, double* x_d, rocsparse_dnvec_descr vec_x,
             mpil_topo,
             mpil_comm);
 
-    spmv(A.sparse_handle, A.d_on_proc.descr, 1.0, vec_x, 
-            0.0, vec_b, A.d_on_proc.buf_size, A.d_on_proc.buffer); 
+    spmv(A.sparse_handle, A.d_on_proc.descr, alpha, vec_x, 
+            beta, vec_b, A.d_on_proc.buf_size, A.d_on_proc.buffer); 
 
-    spmv(A.sparse_handle, A.d_off_proc.descr, 1.0, vec_recv,
+    spmv(A.sparse_handle, A.d_off_proc.descr, alpha, vec_recv,
             1.0, vec_b, A.d_off_proc.buf_size, A.d_off_proc.buffer);
 
     MPIL_Info_free(&mpil_info);
@@ -529,7 +529,7 @@ int main(int argc, char* argv[])
             MPIL_Set_allreduce_algorithm(methods[idx]);
             MPI_Barrier(MPI_COMM_WORLD);
             t0 = MPI_Wtime();
-            HIP_CHECK(hipMemset(x_d, 0, A.local_rows*sizeof(double)));
+            HIP_CHECK(hipMemset(x_d, 0, A.local_cols*sizeof(double)));
             conv_iter = CG(A, x_d, vec_x, b_d, vec_b, sendbuf,
                     recvbuf, vec_recv, persistent_spmv, persistent[idx]);
             tfinal = (MPI_Wtime() - t0);

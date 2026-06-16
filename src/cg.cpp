@@ -55,7 +55,7 @@ void spmv(double alpha, ParMat& A, double* x_d, rocsparse_dnvec_descr vec_x,
     {
         dim3 threads(256);
         dim3 blocks((A.send_comm.size_msgs + threads.x - 1) / threads.x);
-        pack<<<blocks, threads, 0, 0>>>(x_d, A.send_comm.idx_d,
+        pack<<<blocks, threads, 0, 0>>>(x_d, A.send_comm.d_idx,
                 sendbuf, A.send_comm.size_msgs);
     }
 
@@ -70,11 +70,11 @@ void spmv(double alpha, ParMat& A, double* x_d, rocsparse_dnvec_descr vec_x,
             mpil_topo,
             mpil_comm);
 
-    spmv(A.sparse_handle, A.on_proc.descr, 1.0, vec_x, 
-            0.0, vec_b, A.on_proc.buf_size, A.on_proc.buffer); 
+    spmv(A.sparse_handle, A.d_on_proc.descr, 1.0, vec_x, 
+            0.0, vec_b, A.d_on_proc.buf_size, A.d_on_proc.buffer); 
 
-    spmv(A.sparse_handle, A.off_proc.descr, 1.0, vec_recv,
-            1.0, vec_b, A.off_proc.buf_size, A.off_proc.buffer);
+    spmv(A.sparse_handle, A.d_off_proc.descr, 1.0, vec_recv,
+            1.0, vec_b, A.d_off_proc.buf_size, A.d_off_proc.buffer);
 
     MPIL_Info_free(&mpil_info);
     MPIL_Topo_free(&mpil_topo);
@@ -95,36 +95,25 @@ void spmv(double alpha, ParMat& A, double* x_d, rocsparse_dnvec_descr vec_x,
         {
             dim3 threads(256);
             dim3 blocks((A.send_comm.size_msgs + threads.x - 1) / threads.x);
-            pack<<<blocks, threads, 0, 0>>>(x_d, A.send_comm.idx_d, 
+            pack<<<blocks, threads, 0, 0>>>(x_d, A.send_comm.d_idx, 
                     sendbuf, A.send_comm.size_msgs);
         }
 
         MPIL_Start(req);
 
-        spmv(A.sparse_handle, A.on_proc.descr, 1.0, vec_x, 
-                0.0, vec_b, A.on_proc.buf_size, A.on_proc.buffer);
+        spmv(A.sparse_handle, A.d_on_proc.descr, 1.0, vec_x, 
+                0.0, vec_b, A.d_on_proc.buf_size, A.d_on_proc.buffer);
 
         MPIL_Wait(req, MPI_STATUS_IGNORE);
 
-        spmv(A.sparse_handle, A.off_proc.descr, 1.0, vec_recv,
-                1.0, vec_b, A.off_proc.buf_size, A.off_proc.buffer);
+        spmv(A.sparse_handle, A.d_off_proc.descr, 1.0, vec_recv,
+                1.0, vec_b, A.d_off_proc.buf_size, A.d_off_proc.buffer);
     }
     else
     {
         spmv(alpha, A, x_d, vec_x, beta, b_d, vec_b, mpil_comm,
                 sendbuf, recvbuf, vec_recv);
     }
-}
-
-void axpy(rocblas_handle handle, int n, double alpha, double* x_d,
-            double* y_d)
-{
-    rocblas_daxpy(handle, n, &alpha, y_d, 1, x_d, 1);
-}
-
-void scale(rocblas_handle handle, int n, double alpha, double* x_d)
-{
-    rocblas_dscal(handle, n, &alpha, x_d, 1);
 }
 
 double inner_product(rocblas_handle handle, int n, double* a_d, double* b_d,
@@ -195,7 +184,7 @@ int CG(ParMat& A, double* x, rocsparse_dnvec_descr vec_x,
                 &mpil_topo);
         std::vector<long> global_send_idx(A.send_comm.size_msgs);
         for (int i = 0; i < A.send_comm.size_msgs; i++)
-            global_send_idx[i] = A.send_comm.idx[i] + A.first_row;
+            global_send_idx[i] = A.send_comm.idx[i] + A.first_col;
         MPIL_Neighbor_alltoallv_init_ext_topo(sendbuf, 
                 A.send_comm.counts.data(),
                 A.send_comm.ptr.data(),
@@ -382,10 +371,12 @@ int main(int argc, char* argv[])
                 A.recv_comm.size_msgs*sizeof(double)));
     }
 
-    rocsparse_dnvec_descr vec_x, vec_b, vec_recv;
+    rocsparse_dnvec_descr vec_x, vec_b, vec_r, vec_recv;
     ROCSPARSE_CHECK(rocsparse_create_dnvec_descr(&vec_x, A.local_cols, x_d, 
             rocsparse_datatype_f64_r));
     ROCSPARSE_CHECK(rocsparse_create_dnvec_descr(&vec_b, A.local_rows, b_d,
+            rocsparse_datatype_f64_r));
+    ROCSPARSE_CHECK(rocsparse_create_dnvec_descr(&vec_r, A.local_rows, r_d,
             rocsparse_datatype_f64_r));
     ROCSPARSE_CHECK(rocsparse_create_dnvec_descr(&vec_recv, A.recv_comm.size_msgs, 
                 recvbuf, rocsparse_datatype_f64_r));
@@ -396,7 +387,7 @@ int main(int argc, char* argv[])
     double zero = 0.0;
     ROCSPARSE_CHECK(rocsparse_spmv(A.sparse_handle, 
             rocsparse_operation_none,
-            &one, A.d_on_proc, vec_x, &zero, vec_b,
+            &one, A.d_on_proc.descr, vec_x, &zero, vec_b,
             rocsparse_datatype_f64_r,
             rocsparse_spmv_alg_default,
             rocsparse_spmv_stage_buffer_size,
@@ -408,7 +399,7 @@ int main(int argc, char* argv[])
     }
     ROCSPARSE_CHECK(rocsparse_spmv(A.sparse_handle, 
             rocsparse_operation_none,
-            &one, A.d_off_proc, vec_recv, &one, vec_b,
+            &one, A.d_off_proc.descr, vec_recv, &one, vec_b,
             rocsparse_datatype_f64_r,
             rocsparse_spmv_alg_default,
             rocsparse_spmv_stage_buffer_size,
@@ -426,7 +417,8 @@ int main(int argc, char* argv[])
     std::uniform_real_distribution<double> dist(0.0, 1.0);
     std::generate(x.begin(), x.end(),
               [&]() { return dist(rng); });
-    HIP_CHECK(hipMemcpy(x_d, x.data(), x.size() * sizeof(double)));
+    HIP_CHECK(hipMemcpy(x_d, x.data(), x.size() * sizeof(double),
+            hipMemcpyHostToDevice));
     spmv(1.0, A, x_d, vec_x, 0.0, b_d, vec_b, mpil_comm,
             sendbuf, recvbuf, vec_recv);
 
@@ -541,12 +533,12 @@ int main(int argc, char* argv[])
             MPIL_Set_allreduce_algorithm(methods[idx]);
             MPI_Barrier(MPI_COMM_WORLD);
             t0 = MPI_Wtime();
-            hipMemset(x_d, 0, A.local_rows*sizeof(double));
+            HIP_CHECK(hipMemset(x_d, 0, A.local_rows*sizeof(double)));
             conv_iter = CG(A, x_d, vec_x, b_d, vec_b, sendbuf,
                     recvbuf, vec_recv, persistent_spmv, persistent[idx]);
             tfinal = (MPI_Wtime() - t0);
-            hipMemcpy(r_d, b_d, A.local_rows*sizeof(double),
-                    hipMemcpyDeviceToDevice);
+            HIP_CHECK(hipMemcpy(r_d, b_d, A.local_rows*sizeof(double),
+                    hipMemcpyDeviceToDevice));
             spmv(-1.0, A, x_d, vec_x, 0.0, r_d, vec_r, mpil_comm,
                     sendbuf, recvbuf, vec_recv);
             sum = inner_product(A.blas_handle, A.local_rows, r_d,
@@ -565,7 +557,7 @@ int main(int argc, char* argv[])
                 t0 = MPI_Wtime();
                 for (int i = 0; i < n_iters; i++)
                 {
-                    hipMemset(x_d, 0, A.local_rows*sizeof(double));
+                    HIP_CHECK(hipMemset(x_d, 0, A.local_rows*sizeof(double)));
                     CG(A, x_d, vec_x, b_d, vec_b, sendbuf, recvbuf,
                             vec_recv, persistent_spmv, persistent[idx]);
                 }
@@ -582,6 +574,7 @@ int main(int argc, char* argv[])
 
     ROCSPARSE_CHECK(rocsparse_destroy_dnvec_descr(vec_x));
     ROCSPARSE_CHECK(rocsparse_destroy_dnvec_descr(vec_b));
+    ROCSPARSE_CHECK(rocsparse_destroy_dnvec_descr(vec_r));
     ROCSPARSE_CHECK(rocsparse_destroy_dnvec_descr(vec_recv));
 
     HIP_CHECK(hipFree(x_d));

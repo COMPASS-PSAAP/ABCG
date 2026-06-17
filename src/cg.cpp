@@ -578,11 +578,8 @@ if (rank == 0) printf("norm b %e\n", norm_b);
                         MPI_COMM_WORLD);
                 if (rank == 0) printf("CG with %s Allreduce: %e\n", 
                         names[idx], t0);
-break;
             }
-break;
         }
-break;
     }
 
     ROCSPARSE_CHECK(rocsparse_destroy_dnvec_descr(vec_x));

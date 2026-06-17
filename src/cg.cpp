@@ -121,6 +121,7 @@ double inner_product(rocblas_handle handle, int n, double* a_d, double* b_d,
             MPIL_Comm* mpil_comm, MPIL_Request* mpil_req)
 {
     rocblas_ddot(handle, n, a_d, 1, b_d, 1, local_sum_ptr);
+    HIP_CHECK(hipStreamSynchronize(0));
 
     if (mpil_req == NULL)
     {
@@ -529,12 +530,14 @@ int main(int argc, char* argv[])
             MPIL_Set_allreduce_algorithm(methods[idx]);
             MPI_Barrier(MPI_COMM_WORLD);
             t0 = MPI_Wtime();
-            HIP_CHECK(hipMemset(x_d, 0, A.local_cols*sizeof(double)));
+            HIP_CHECK(hipMemsetAsync(x_d, 0, A.local_cols*sizeof(double), 0));
+            HIP_CHECK(hipStreamSynchronize(0));
             conv_iter = CG(A, x_d, vec_x, b_d, vec_b, sendbuf,
                     recvbuf, vec_recv, persistent_spmv, persistent[idx]);
             tfinal = (MPI_Wtime() - t0);
-            HIP_CHECK(hipMemcpy(r_d, b_d, A.local_rows*sizeof(double),
-                    hipMemcpyDeviceToDevice));
+            HIP_CHECK(hipMemcpyAsync(r_d, b_d, A.local_rows*sizeof(double),
+                    hipMemcpyDeviceToDevice, 0));
+            HIP_CHECK(hipStreamSynchronize(0));
             spmv(-1.0, A, x_d, vec_x, 1.0, r_d, vec_r, mpil_comm,
                     sendbuf, recvbuf, vec_recv);
             sum = inner_product(A.blas_handle, A.local_rows, r_d,
@@ -553,7 +556,8 @@ int main(int argc, char* argv[])
                 t0 = MPI_Wtime();
                 for (int i = 0; i < n_iters; i++)
                 {
-                    HIP_CHECK(hipMemset(x_d, 0, A.local_rows*sizeof(double)));
+                    HIP_CHECK(hipMemsetAsync(x_d, 0, A.local_rows*sizeof(double), 0));
+                    HIP_CHECK(hipStreamSynchronize(0));
                     CG(A, x_d, vec_x, b_d, vec_b, sendbuf, recvbuf,
                             vec_recv, persistent_spmv, persistent[idx]);
                 }

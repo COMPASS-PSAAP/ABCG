@@ -57,6 +57,7 @@ void spmv(double alpha, ParMat& A, double* x_d, rocsparse_dnvec_descr vec_x,
         dim3 blocks((A.send_comm.size_msgs + threads.x - 1) / threads.x);
         pack<<<blocks, threads, 0, 0>>>(x_d, (const int*)A.send_comm.d_idx,
                 sendbuf, A.send_comm.size_msgs);
+        HIP_CHECK(hipStreamSynchronize(0));
     }
 
     MPIL_Neighbor_alltoallv_topo(sendbuf,
@@ -75,6 +76,7 @@ void spmv(double alpha, ParMat& A, double* x_d, rocsparse_dnvec_descr vec_x,
 
     spmv(A.sparse_handle, A.d_off_proc.descr, alpha, vec_recv,
             1.0, vec_b, A.d_off_proc.buf_size, A.d_off_proc.buffer);
+    HIP_CHECK(hipStreamSynchronize(0));
 
     MPIL_Info_free(&mpil_info);
     MPIL_Topo_free(&mpil_topo);
@@ -97,6 +99,7 @@ void spmv(double alpha, ParMat& A, double* x_d, rocsparse_dnvec_descr vec_x,
             dim3 blocks((A.send_comm.size_msgs + threads.x - 1) / threads.x);
             pack<<<blocks, threads, 0, 0>>>(x_d, (const int*)A.send_comm.d_idx, 
                     sendbuf, A.send_comm.size_msgs);
+            HIP_CHECK(hipStreamSynchronize(0));
         }
 
         MPIL_Start(req);
@@ -108,6 +111,7 @@ void spmv(double alpha, ParMat& A, double* x_d, rocsparse_dnvec_descr vec_x,
 
         spmv(A.sparse_handle, A.d_off_proc.descr, alpha, vec_recv,
                 1.0, vec_b, A.d_off_proc.buf_size, A.d_off_proc.buffer);
+        HIP_CHECK(hipStreamSynchronize(0));
     }
     else
     {
@@ -216,14 +220,16 @@ int CG(ParMat& A, double* x, rocsparse_dnvec_descr vec_x,
     int max_iter = 500;
 
     // r0 = b - A * x0
-    HIP_CHECK(hipMemcpy(r, b, A.local_rows*sizeof(double),
-            hipMemcpyDeviceToDevice));
+    HIP_CHECK(hipMemcpyAsync(r, b, A.local_rows*sizeof(double),
+            hipMemcpyDeviceToDevice, 0));
+    HIP_CHECK(hipStreamSynchronize(0));
     spmv(-1.0, A, x, vec_x, 1.0, r, vec_r, mpil_comm,
             sendbuf, recvbuf, vec_recv, mpil_spmv_req);
 
     // p0 = r0
-    HIP_CHECK(hipMemcpy(p, r, A.local_rows*sizeof(double),
-            hipMemcpyDeviceToDevice));
+    HIP_CHECK(hipMemcpyAsync(p, r, A.local_rows*sizeof(double),
+            hipMemcpyDeviceToDevice, 0));
+    HIP_CHECK(hipStreamSynchronize(0));
 
     // Find initial (r, r) and residual
     rr_inner = inner_product(A.blas_handle, A.local_rows, r, 
@@ -257,6 +263,7 @@ int CG(ParMat& A, double* x, rocsparse_dnvec_descr vec_x,
         alpha = rr_inner / App_inner;
 
         rocblas_daxpy(A.blas_handle, A.local_rows, &alpha, p, 1, x, 1);
+        HIP_CHECK(hipStreamSynchronize(0));
 
         // x_{i+1} = x_i + alpha_i * p_i
         if ((iter % recompute_r) && iter > 0)
@@ -264,11 +271,13 @@ int CG(ParMat& A, double* x, rocsparse_dnvec_descr vec_x,
             alpha *= -1.0;
             rocblas_daxpy(A.blas_handle, A.local_rows, &alpha,
                     Ap, 1, r, 1);
+            HIP_CHECK(hipStreamSynchronize(0));
         }
         else
         {
-            HIP_CHECK(hipMemcpy(r, b, A.local_rows*sizeof(double),
-                    hipMemcpyDeviceToDevice));
+            HIP_CHECK(hipMemcpyAsync(r, b, A.local_rows*sizeof(double),
+                    hipMemcpyDeviceToDevice, 0));
+            HIP_CHECK(hipStreamSynchronize(0));
             spmv(-1.0, A, x, vec_x, 1.0, r, vec_r, mpil_comm,
                     sendbuf, recvbuf, vec_recv, mpil_spmv_req);
         }
@@ -280,6 +289,7 @@ int CG(ParMat& A, double* x, rocsparse_dnvec_descr vec_x,
         rocblas_dscal(A.blas_handle, A.local_rows, &beta, p, 1);
         rocblas_daxpy(A.blas_handle, A.local_rows, &one, r,
                 1, p, 1);
+        HIP_CHECK(hipStreamSynchronize(0));
 
         // Update next inner product
         rr_inner = next_inner;
@@ -400,7 +410,7 @@ int main(int argc, char* argv[])
     }
     ROCSPARSE_CHECK(rocsparse_spmv(A.sparse_handle, 
             rocsparse_operation_none,
-            &one, A.d_off_proc.descr, vec_recv, &one, vec_b,
+            &one, A.d_off_proc.descr, vec_recv, &zero, vec_b,
             rocsparse_datatype_f64_r,
             rocsparse_spmv_alg_default,
             rocsparse_spmv_stage_buffer_size,
@@ -431,6 +441,7 @@ int main(int argc, char* argv[])
     norm_b = inner_product(A.blas_handle, A.local_rows, b_d,
             b_d, &local_norm_b, &norm_b, mpil_comm, NULL);
     norm_b = sqrt(norm_b);
+if (rank == 0) printf("norm b %e\n", norm_b);
 
     std::vector<NeighborAlltoallvMethod> neighbor_methods = {
             NEIGHBOR_ALLTOALLV_GPU_STANDARD, 
@@ -542,6 +553,7 @@ int main(int argc, char* argv[])
                     sendbuf, recvbuf, vec_recv);
             sum = inner_product(A.blas_handle, A.local_rows, r_d,
                     r_d, &local_norm_b, &sum, mpil_comm, NULL);
+            if (rank == 0) printf("Sum %e\n", sum);
             if (rank == 0) printf("CG + %s: %d iter, norm %e\n", 
                     names[idx], conv_iter, sqrt(sum) / norm_b);
 
@@ -566,9 +578,11 @@ int main(int argc, char* argv[])
                         MPI_COMM_WORLD);
                 if (rank == 0) printf("CG with %s Allreduce: %e\n", 
                         names[idx], t0);
+break;
             }
+break;
         }
-
+break;
     }
 
     ROCSPARSE_CHECK(rocsparse_destroy_dnvec_descr(vec_x));

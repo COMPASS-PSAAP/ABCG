@@ -1,2 +1,2 @@
-# CG
-Standalone CG solver
+# ABCG
+Amanda Bienz's CG (ABCG) solver

@@ -33,7 +33,7 @@ target_link_libraries(cg_mpi PRIVATE MPI::MPI_CXX)
 if (locality_aware_FOUND)
     message(STATUS "Building ${BoldBlue}MPI Advance ${ColorReset}Variant")
     # Define the MPIL executable
-    add_executable(cg_mpil src/cg.cpp)
+    add_executable(cg_mpil src/cg_mpil.cpp)
     target_link_libraries(cg_mpil PRIVATE MPIAdvance::locality_aware MPI::MPI_CXX)
 else()
     message(STATUS "${BoldRed}NOT building ${BoldBlue}MPI Advance ${BoldRed}Variant${ColorReset}.")

@@ -1,8 +1,8 @@
 #include "cg.hpp"
 
-// Parallel SpMV b = alpha*A*x + beta*b 
-void spmv(double alpha, ParMat& A, std::vector<double>& x, 
-        double beta, std::vector<double>& b)
+// Parallel SpMV b = alpha*A*x + beta*b
+void spmv(
+    double alpha, ParMat& A, std::vector<double>& x, double beta, std::vector<double>& b)
 {
     int proc, start, end;
     int tag = 0;
@@ -29,7 +29,9 @@ void spmv(double alpha, ParMat& A, std::vector<double>& x,
         start = A.send_comm.ptr[i];
         end   = A.send_comm.ptr[i + 1];
         for (int j = start; j < end; j++)
+        {
             sendbuf[j] = x[A.send_comm.idx[j]];
+        }
         MPI_Isend(&(sendbuf[start]),
                   (int)(end - start),
                   MPI_DOUBLE,
@@ -52,7 +54,6 @@ void spmv(double alpha, ParMat& A, std::vector<double>& x,
     }
 
     spmv(alpha, A.off_proc, recvbuf, 1.0, b);
-
 }
 
 double inner_product(std::vector<double> a, std::vector<double> b)
@@ -61,7 +62,9 @@ double inner_product(std::vector<double> a, std::vector<double> b)
 
     sum_local = 0;
     for (int i = 0; i < a.size(); i++)
+    {
         sum_local += a[i] * b[i];
+    }
 
     MPI_Allreduce(&sum_local, &sum, 1, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
 
@@ -97,7 +100,7 @@ int main(int argc, char* argv[])
     double alpha, beta;
     double rr_inner, next_inner, App_inner;
     double norm_r, tol = 1e-6;
-    int max_iter = ((int)(1.3*b.size())) + 2;
+    int max_iter = ((int)(1.3 * b.size())) + 2;
 
     // r0 = b - A * x0
     r = b;
@@ -108,7 +111,7 @@ int main(int argc, char* argv[])
 
     // Find initial (r, r) and residual
     rr_inner = inner_product(r, r);
-    norm_r = sqrt(rr_inner);
+    norm_r   = sqrt(rr_inner);
     res.push_back(norm_r);
 
     // Scale tolerance by norm_r
@@ -119,7 +122,7 @@ int main(int argc, char* argv[])
 
     // How often should r be recomputed
     recompute_r = 8;
-    iter = 0;
+    iter        = 0;
 
     // Main CG Loop
     while (norm_r > tol && iter < max_iter)
@@ -139,7 +142,7 @@ int main(int argc, char* argv[])
         // x_{i+1} = x_i + alpha_i * p_i
         if ((iter % recompute_r) && iter > 0)
         {
-            axpy(-1.0*alpha, r, Ap);
+            axpy(-1.0 * alpha, r, Ap);
         }
         else
         {
@@ -148,26 +151,30 @@ int main(int argc, char* argv[])
         }
 
         next_inner = inner_product(r, r);
-        beta = next_inner / rr_inner;
+        beta       = next_inner / rr_inner;
 
         scale(beta, p);
         axpy(1.0, p, r);
 
         // Update next inner product
         rr_inner = next_inner;
-        norm_r = sqrt(rr_inner);
+        norm_r   = sqrt(rr_inner);
 
         res.push_back(norm_r);
 
         iter++;
     }
 
-    if (rank == 0) 
+    if (rank == 0)
     {
         if (iter == max_iter)
+        {
             printf("Max Iterations Reached.\n");
+        }
         else
+        {
             printf("%d Iteration required to converge\n", iter);
+        }
         printf("2 Norm of Residual: %lg\n\n", norm_r);
     }
 

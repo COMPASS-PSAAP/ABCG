@@ -1,10 +1,7 @@
-#include "sparse_mat.hpp"
-#include "par_binary_IO.hpp"
-#include <math.h>
+#include "cg.hpp"
 
-
-//#ifdef CG_WITH_MPIL
 #include "locality_aware.h"
+
 struct NeighborConfig
 {
     const char* name;
@@ -19,27 +16,6 @@ struct AllreduceConfig
     AllreduceMethod method;
     bool persistent;
 };
-//#endif
-
-// Serial SpMV b = alpha*A*x + beta*b
-void spmv(double alpha, Mat& A, std::vector<double>& x,
-        double beta, std::vector<double>& b)
-{
-    double sum;
-    int start, end;
-
-    for (int i = 0; i < A.n_rows; i++)
-    {
-        start = A.rowptr[i];
-        end = A.rowptr[i+1];
-        sum = 0;
-        for (int j = start; j < end; j++)
-        {
-            sum += A.data[j] * x[A.col_idx[j]];
-        }
-        b[i] = alpha * sum + beta * b[i];
-    }
-}
 
 void spmv(double alpha, ParMat& A, std::vector<double>& x, 
         double beta, std::vector<double>& b, MPIL_Comm* mpil_comm)
@@ -111,18 +87,6 @@ void spmv(double alpha, ParMat& A, std::vector<double>& x,
     {
         spmv(alpha, A, x, beta, b, mpil_comm);
     }
-}
-
-void axpy(double alpha, std::vector<double>& x, std::vector<double>& y)
-{
-    for (int i = 0; i < x.size(); i++)
-        x[i] = x[i] + alpha*y[i];
-}
-
-void scale(double alpha, std::vector<double>& x)
-{
-    for (int i = 0; i < x.size(); i++)
-        x[i] = alpha*x[i];
 }
 
 double inner_product(std::vector<double>& a, std::vector<double>& b,
@@ -308,38 +272,17 @@ int main(int argc, char* argv[])
     MPIL_Comm_init(&mpil_comm, MPI_COMM_WORLD);
 
     MPIL_Comm_topo_init(mpil_comm);
-    int ppn = num_procs;
-    //MPIL_Comm_local_size(mpil_comm, &ppn);
+    int ppn;
+    MPIL_Comm_local_size(mpil_comm, &ppn);
 
     // 4 NUMA regions per node, aggregate by NUMA
     MPIL_Comm_update_locality(mpil_comm, ppn / 8);
 
-    const char* filename = "Dubcova2.pm";
-    if (argc > 1)
-    {
-        filename = argv[1];
-    }
-
-    ParMat A;
-
-    MPI_Barrier(MPI_COMM_WORLD);
-    t0 = MPI_Wtime();
-    readParMatrix(filename, A);
-    tfinal = MPI_Wtime() - t0;
-    MPI_Allreduce(&tfinal, &t0, 1, MPI_DOUBLE, MPI_MAX, MPI_COMM_WORLD);
-    if (rank == 0) printf("Read matrix: %e\n", t0);
-    fflush(stdout);
-
-    MPI_Barrier(MPI_COMM_WORLD);
-    t0 = MPI_Wtime();
-    form_comm(A);
-    tfinal = MPI_Wtime() - t0;
-    MPI_Allreduce(&tfinal, &t0, 1, MPI_DOUBLE, MPI_MAX, MPI_COMM_WORLD);
-    if (rank == 0) printf("Form comm: %e\n", t0);
-    fflush(stdout);
-
-    std::vector<double> x(A.local_cols);
-    std::vector<double> b(A.local_rows);
+    // Init matrix from file
+    int num_tests;
+    std::vector<double> x;
+    std::vector<double> b;
+    ParMat A = initialize_cg(&argc, &argv, rank, num_tests, x, b);
 
     // Set b to random values, x to 0
     srand(time(NULL) + rank);
@@ -420,7 +363,7 @@ int main(int argc, char* argv[])
             if (t0 < 1.0)
                 n_iters = 1.0 / t0;
 
-            for (int test = 0; test < 5; test++)
+            for (int test = 0; test < num_tests; test++)
             {
                 MPI_Barrier(MPI_COMM_WORLD);
                 t0 = MPI_Wtime();

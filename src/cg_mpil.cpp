@@ -1,10 +1,9 @@
 #include "cg.hpp"
-
 #include "locality_aware.h"
 
 struct NeighborConfig
 {
-    const char* name;
+    std::string name;
     NeighborAlltoallvMethod method;
     NeighborAlltoallvInitMethod init_method;
     bool persistent;
@@ -12,7 +11,7 @@ struct NeighborConfig
 
 struct AllreduceConfig
 {
-    const char* name;
+    std::string name;
     AllreduceMethod method;
     bool persistent;
 };
@@ -126,11 +125,8 @@ double inner_product(std::vector<double>& a,
     return *global_sum_ptr;
 }
 
-int CG(ParMat& A,
-       std::vector<double>& x,
-       std::vector<double>& b,
-       bool spmv_init,
-       bool allreduce_init)
+int CG(
+    ParMat& A, std::vector<double>& x, std::vector<double>& b, bool spmv_init, bool allreduce_init)
 {
     int rank, num_procs;
     MPI_Comm_rank(MPI_COMM_WORLD, &rank);
@@ -187,14 +183,8 @@ int CG(ParMat& A,
 
     if (allreduce_init)
     {
-        MPIL_Allreduce_init(&local_sum,
-                            &global_sum,
-                            1,
-                            MPI_DOUBLE,
-                            MPI_SUM,
-                            mpil_comm,
-                            mpil_info,
-                            &mpil_req);
+        MPIL_Allreduce_init(
+            &local_sum, &global_sum, 1, MPI_DOUBLE, MPI_SUM, mpil_comm, mpil_info, &mpil_req);
     }
 
     int iter, recompute_r;
@@ -302,45 +292,25 @@ int main(int argc, char* argv[])
     MPIL_Comm_update_locality(mpil_comm, ppn / 8);
 
     // Init matrix from file
-    int num_tests;
     std::vector<double> x;
     std::vector<double> b;
-    ParMat A = initialize_cg(&argc, &argv, rank, num_tests, x, b);
+    ParMat A = initialize_cg(&argc, &argv, rank, x, b);
 
     // Set b to random values, x to 0
     srand(time(NULL) + rank);
     std::generate(x.begin(), x.end(), [&]() { return (double)(rand()) / RAND_MAX; });
     spmv(1.0, A, x, 0.0, b, mpil_comm);
+    double norm_b = calc_norm_b(b);
 
     int n_iters;
     int conv_iter;
     std::vector<double> r;
-    double sum;
-    double norm_b;
-    norm_b = 0;
-    for (int i = 0; i < b.size(); i++)
-    {
-        norm_b += b[i] * b[i];
-    }
-    MPI_Allreduce(MPI_IN_PLACE, &norm_b, 1, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
-    norm_b = sqrt(norm_b);
 
-    std::vector<NeighborConfig> neighbor_configs = {{"Standard",
-                                                     NEIGHBOR_ALLTOALLV_STANDARD,
-                                                     NEIGHBOR_ALLTOALLV_INIT_STANDARD,
-                                                     false},
-                                                    {"Locality",
-                                                     NEIGHBOR_ALLTOALLV_LOCALITY,
-                                                     NEIGHBOR_ALLTOALLV_INIT_LOCALITY,
-                                                     false},
-                                                    {"Pers Standard",
-                                                     NEIGHBOR_ALLTOALLV_STANDARD,
-                                                     NEIGHBOR_ALLTOALLV_INIT_STANDARD,
-                                                     true},
-                                                    {"Pers Locality",
-                                                     NEIGHBOR_ALLTOALLV_LOCALITY,
-                                                     NEIGHBOR_ALLTOALLV_INIT_LOCALITY,
-                                                     true}};
+    std::vector<NeighborConfig> neighbor_configs = {
+        {"Standard", NEIGHBOR_ALLTOALLV_STANDARD, NEIGHBOR_ALLTOALLV_INIT_STANDARD, false},
+        {"Locality", NEIGHBOR_ALLTOALLV_LOCALITY, NEIGHBOR_ALLTOALLV_INIT_LOCALITY, false},
+        {"Pers Standard", NEIGHBOR_ALLTOALLV_STANDARD, NEIGHBOR_ALLTOALLV_INIT_STANDARD, true},
+        {"Pers Locality", NEIGHBOR_ALLTOALLV_LOCALITY, NEIGHBOR_ALLTOALLV_INIT_LOCALITY, true}};
 
     std::vector<AllreduceConfig> allreduce_configs = {
         {"PMPI", ALLREDUCE_PMPI, false},
@@ -360,7 +330,7 @@ int main(int argc, char* argv[])
     {
         if (rank == 0)
         {
-            printf("Running with %s Neighbor Collectives\n", neighbor_config.name);
+            printf("Running with %s Neighbor Collectives\n", neighbor_config.name.c_str());
         }
 
         if (neighbor_config.persistent)
@@ -378,33 +348,15 @@ int main(int argc, char* argv[])
             MPI_Barrier(MPI_COMM_WORLD);
             t0 = MPI_Wtime();
             std::fill(x.begin(), x.end(), 0);
-            conv_iter =
-                CG(A, x, b, neighbor_config.persistent, allreduce_config.persistent);
-            tfinal = (MPI_Wtime() - t0);
-            r      = b;
+            conv_iter = CG(A, x, b, neighbor_config.persistent, allreduce_config.persistent);
+            tfinal    = (MPI_Wtime() - t0);
+            r         = b;
             spmv(-1.0, A, x, 1.0, r, mpil_comm);
-            sum = 0;
-            for (int i = 0; i < r.size(); i++)
-            {
-                sum += r[i] * r[i];
-            }
-            MPI_Allreduce(MPI_IN_PLACE, &sum, 1, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
-            if (rank == 0)
-            {
-                printf("CG + %s: %d iter, norm %e\n",
-                       allreduce_config.name,
-                       conv_iter,
-                       sqrt(sum) / norm_b);
-            }
 
-            n_iters = 1;
-            MPI_Allreduce(&tfinal, &t0, 1, MPI_DOUBLE, MPI_MAX, MPI_COMM_WORLD);
-            if (t0 < 1.0)
-            {
-                n_iters = 1.0 / t0;
-            }
+            n_iters = calc_num_iters(
+                r, rank, conv_iter, norm_b, tfinal, std::string("CG + ") + allreduce_config.name);
 
-            for (int test = 0; test < num_tests; test++)
+            for (int test = 0; test < ABCG::max_tests; test++)
             {
                 MPI_Barrier(MPI_COMM_WORLD);
                 t0 = MPI_Wtime();
@@ -417,7 +369,8 @@ int main(int argc, char* argv[])
                 MPI_Allreduce(&tfinal, &t0, 1, MPI_DOUBLE, MPI_MAX, MPI_COMM_WORLD);
                 if (rank == 0)
                 {
-                    printf("CG with %s Allreduce: %e\n", allreduce_config.name, t0);
+                    std::printf("CG with %s Allreduce: %lg\n", allreduce_config.name.c_str(), t0);
+                    std::cout << std::flush;
                 }
             }
         }

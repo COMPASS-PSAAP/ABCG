@@ -1,8 +1,7 @@
 #include "cg.hpp"
 
 // Parallel SpMV b = alpha*A*x + beta*b
-void spmv(
-    double alpha, ParMat& A, std::vector<double>& x, double beta, std::vector<double>& b)
+void spmv(double alpha, ParMat& A, std::vector<double>& x, double beta, std::vector<double>& b)
 {
     int proc, start, end;
     int tag = 0;
@@ -71,25 +70,9 @@ double inner_product(std::vector<double> a, std::vector<double> b)
     return sum;
 }
 
-int main(int argc, char* argv[])
+std::tuple<int, double, double> CG(ParMat& A, std::vector<double>& x, std::vector<double>& b)
 {
-    MPI_Init(&argc, &argv);
-    int rank, num_procs;
-    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
-    MPI_Comm_size(MPI_COMM_WORLD, &num_procs);
-
-    // Init matrix from file
-    int num_tests;
-    std::vector<double> x;
-    std::vector<double> b;
-    ParMat A = initialize_cg(&argc, &argv, rank, num_tests, x, b);
-
-    // Set b to random values, x to 0
-    srand(time(NULL) + rank);
-    std::generate(x.begin(), x.end(), [&]() { return (double)(rand()) / RAND_MAX; });
-    spmv(1.0, A, x, 0.0, b);
-    std::fill(x.begin(), x.end(), 0);
-
+    double t0 = MPI_Wtime();
     // CG Variables
     std::vector<double> r(A.local_rows);
     std::vector<double> p(A.local_rows);
@@ -99,8 +82,12 @@ int main(int argc, char* argv[])
     int iter, recompute_r;
     double alpha, beta;
     double rr_inner, next_inner, App_inner;
-    double norm_r, tol = 1e-6;
-    int max_iter = ((int)(1.3 * b.size())) + 2;
+    double norm_r;
+    double tol = ABCG::tol;
+    // int max_iters = ((int)(1.3 * b.size())) + 2;
+    int max_iters = ABCG::max_iters;
+
+    std::fill(x.begin(), x.end(), 0);
 
     // r0 = b - A * x0
     r = b;
@@ -125,7 +112,7 @@ int main(int argc, char* argv[])
     iter        = 0;
 
     // Main CG Loop
-    while (norm_r > tol && iter < max_iter)
+    while (norm_r > tol && iter < max_iters)
     {
         // alpha_i = (r_i, r_i) / (A*p_i, p_i)
         spmv(1.0, A, p, 0.0, Ap);
@@ -164,18 +151,53 @@ int main(int argc, char* argv[])
 
         iter++;
     }
+    return {iter, norm_r, (MPI_Wtime() - t0)};
+}
 
-    if (rank == 0)
+int main(int argc, char* argv[])
+{
+    MPI_Init(&argc, &argv);
+    int rank, num_procs;
+    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+    MPI_Comm_size(MPI_COMM_WORLD, &num_procs);
+
+    // Init matrix from file
+    std::vector<double> x;
+    std::vector<double> b;
+    ParMat A = initialize_cg(&argc, &argv, rank, x, b);
+
+    // Set b to random values, x to 0
+    srand(time(NULL) + rank);
+    std::generate(x.begin(), x.end(), [&]() { return (double)(rand()) / RAND_MAX; });
+    spmv(1.0, A, x, 0.0, b);
+    double norm_b = calc_norm_b(b);
+
+    MPI_Barrier(MPI_COMM_WORLD);
+    std::tuple<int, double, double> results = CG(A, x, b);
+    std::vector<double> r                   = b;
+    spmv(-1.0, A, x, 1.0, r);
+
+    int n_iters =
+        calc_num_iters(r, rank, std::get<0>(results), norm_b, std::get<2>(results), "CG + MPI");
+
+    for (int test = 0; test < ABCG::max_tests; test++)
     {
-        if (iter == max_iter)
+        double total_time = 0.0;
+        MPI_Barrier(MPI_COMM_WORLD);
+
+        for (int i = 0; i < n_iters; i++)
         {
-            printf("Max Iterations Reached.\n");
+            results = CG(A, x, b);
+            total_time += std::get<2>(results);
         }
-        else
+        total_time      = total_time / n_iters;
+        double max_time = 0.0;
+        MPI_Allreduce(&total_time, &max_time, 1, MPI_DOUBLE, MPI_MAX, MPI_COMM_WORLD);
+        if (rank == 0)
         {
-            printf("%d Iteration required to converge\n", iter);
+            std::printf("CG with MPI Allreduce: %lg\n", max_time);
+            std::cout << std::flush;
         }
-        printf("2 Norm of Residual: %lg\n\n", norm_r);
     }
 
     MPI_Finalize();

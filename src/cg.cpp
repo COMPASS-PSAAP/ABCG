@@ -1,7 +1,25 @@
 #include "sparse_mat.hpp"
 #include "par_binary_IO.hpp"
-#include "locality_aware.h"
 #include <math.h>
+
+
+//#ifdef CG_WITH_MPIL
+#include "locality_aware.h"
+struct NeighborConfig
+{
+    const char* name;
+    NeighborAlltoallvMethod method;
+    NeighborAlltoallvInitMethod init_method;
+    bool persistent;
+};
+
+struct AllreduceConfig
+{
+    const char* name;
+    AllreduceMethod method;
+    bool persistent;
+};
+//#endif
 
 // Serial SpMV b = alpha*A*x + beta*b
 void spmv(double alpha, Mat& A, std::vector<double>& x,
@@ -290,8 +308,8 @@ int main(int argc, char* argv[])
     MPIL_Comm_init(&mpil_comm, MPI_COMM_WORLD);
 
     MPIL_Comm_topo_init(mpil_comm);
-    int ppn;
-    MPIL_Comm_local_size(mpil_comm, &ppn);
+    int ppn = num_procs;
+    //MPIL_Comm_local_size(mpil_comm, &ppn);
 
     // 4 NUMA regions per node, aggregate by NUMA
     MPIL_Comm_update_locality(mpil_comm, ppn / 8);
@@ -341,89 +359,51 @@ int main(int argc, char* argv[])
             MPI_COMM_WORLD);
     norm_b = sqrt(norm_b);
 
-    std::vector<NeighborAlltoallvMethod> neighbor_methods = {
-            NEIGHBOR_ALLTOALLV_STANDARD, 
-            NEIGHBOR_ALLTOALLV_LOCALITY
-            };
-    std::vector<NeighborAlltoallvInitMethod> neighbor_init_methods = {
-            NEIGHBOR_ALLTOALLV_INIT_STANDARD, 
-            NEIGHBOR_ALLTOALLV_INIT_LOCALITY
-            };
-    std::vector<const char*> neighbor_names = {
-            "Standard", 
-            "Locality", 
-            "Pers Standard", 
-            "Pers Locality"
-            };
-    std::vector<bool> neighbor_persistent = {false, false, true, true};
-
-    std::vector<AllreduceMethod> methods = {
-            ALLREDUCE_PMPI, 
-            ALLREDUCE_RECURSIVE_DOUBLING, 
-            ALLREDUCE_DISSEMINATION_LOC, 
-            ALLREDUCE_DISSEMINATION_ML, 
-            ALLREDUCE_DISSEMINATION_RADIX,
-            ALLREDUCE_RECURSIVE_DOUBLING, 
-            ALLREDUCE_DISSEMINATION_LOC, 
-            ALLREDUCE_DISSEMINATION_ML, 
-            ALLREDUCE_DISSEMINATION_RADIX, 
-            ALLREDUCE_RMA_HIERARCHICAL,
-            ALLREDUCE_RMA_HIERARCHICAL_EARLYBIRD, 
-            //ALLREDUCE_RMA_MULTILEADER,
-            //ALLREDUCE_RMA_MULTILEADER_EARLYBIRD
-            };
-    std::vector<const char*> names = {
-            "PMPI", 
-            "MPIL RD", 
-            "MPIL NA", 
-            "MPIL LA", 
-            "MPIL RADIX",
-            "MPIL RD Pers", 
-            "MPIL NA Pers", 
-            "MPIL LA Pers", 
-            "MPIL RADIX Pers",
-            "MPIL RMA Hier Pers", 
-            "MPIL RMA Hier EB Pers", 
-            //"MPIL RMA ML Pers", 
-            //"MPIL RMA ML EB Pers"
-            };
-    std::vector<bool> persistent = {
-            false,
-            false,
-            false,
-            false,
-            false,
-            true,
-            true,
-            true,
-            true,
-            true,
-            true,
-            //true,
-            //true
+    std::vector<NeighborConfig> neighbor_configs = {
+            {"Standard", NEIGHBOR_ALLTOALLV_STANDARD,
+                    NEIGHBOR_ALLTOALLV_INIT_STANDARD, false},
+            {"Locality", NEIGHBOR_ALLTOALLV_LOCALITY,
+                    NEIGHBOR_ALLTOALLV_INIT_LOCALITY, false},
+            {"Pers Standard", NEIGHBOR_ALLTOALLV_STANDARD,
+                    NEIGHBOR_ALLTOALLV_INIT_STANDARD, true},
+            {"Pers Locality", NEIGHBOR_ALLTOALLV_LOCALITY,
+                    NEIGHBOR_ALLTOALLV_INIT_LOCALITY, true}
             };
 
-    for (int neigh_idx = 0; neigh_idx < neighbor_names.size(); neigh_idx++)
+    std::vector<AllreduceConfig> allreduce_configs = {
+            {"PMPI", ALLREDUCE_PMPI, false},
+            {"MPIL RD", ALLREDUCE_RECURSIVE_DOUBLING, false},
+            {"MPIL NA", ALLREDUCE_DISSEMINATION_LOC, false},
+            {"MPIL LA", ALLREDUCE_DISSEMINATION_ML, false},
+            {"MPIL RADIX", ALLREDUCE_DISSEMINATION_RADIX, false},
+            {"MPIL RD Pers", ALLREDUCE_RECURSIVE_DOUBLING, true},
+            {"MPIL NA Pers", ALLREDUCE_DISSEMINATION_LOC, true},
+            {"MPIL LA Pers", ALLREDUCE_DISSEMINATION_ML, true},
+            {"MPIL RADIX Pers", ALLREDUCE_DISSEMINATION_RADIX, true}
+            // {"MPIL RMA Hier Pers", ALLREDUCE_RMA_HIERARCHICAL, true},
+            // {"MPIL RMA Hier EB Pers", ALLREDUCE_RMA_HIERARCHICAL_EARLYBIRD, true}
+            };
+
+    for (const auto& neighbor_config : neighbor_configs)
     {
-        if (rank == 0) printf("Running with %s Neighbor Collectives\n", 
-                    neighbor_names[neigh_idx]);
+        if (rank == 0) printf("Running with %s Neighbor Collectives\n",
+                    neighbor_config.name);
 
-        bool persistent_spmv = neighbor_persistent[neigh_idx];
-        if (persistent_spmv)
+        if (neighbor_config.persistent)
             MPIL_Set_alltoallv_neighbor_init_algorithm(
-                        neighbor_init_methods[neigh_idx - neighbor_methods.size()]);
+                        neighbor_config.init_method);
         else
             MPIL_Set_alltoallv_neighbor_algorithm(
-                        neighbor_methods[neigh_idx]);
+                        neighbor_config.method);
 
-
-        for (int idx = 0; idx < names.size(); idx++)
+        for (const auto& allreduce_config : allreduce_configs)
         {
-            MPIL_Set_allreduce_algorithm(methods[idx]);
+            MPIL_Set_allreduce_algorithm(allreduce_config.method);
             MPI_Barrier(MPI_COMM_WORLD);
             t0 = MPI_Wtime();
             std::fill(x.begin(), x.end(), 0);
-            conv_iter = CG(A, x, b, persistent_spmv, persistent[idx]);
+            conv_iter = CG(A, x, b, neighbor_config.persistent,
+                    allreduce_config.persistent);
             tfinal = (MPI_Wtime() - t0);
             r = b;
             spmv(-1.0, A, x, 1.0, r, mpil_comm);
@@ -432,8 +412,8 @@ int main(int argc, char* argv[])
                 sum += r[i] * r[i];
             MPI_Allreduce(MPI_IN_PLACE, &sum, 1, MPI_DOUBLE, MPI_SUM,
                     MPI_COMM_WORLD);
-            if (rank == 0) printf("CG + %s: %d iter, norm %e\n", 
-                    names[idx], conv_iter, sqrt(sum) / norm_b);
+            if (rank == 0) printf("CG + %s: %d iter, norm %e\n",
+                    allreduce_config.name, conv_iter, sqrt(sum) / norm_b);
 
             n_iters = 1;
             MPI_Allreduce(&tfinal, &t0, 1, MPI_DOUBLE, MPI_MAX, MPI_COMM_WORLD);
@@ -447,16 +427,16 @@ int main(int argc, char* argv[])
                 for (int i = 0; i < n_iters; i++)
                 {
                     std::fill(x.begin(), x.end(), 0);
-                    CG(A, x, b, persistent_spmv, persistent[idx]);
+                    CG(A, x, b, neighbor_config.persistent,
+                            allreduce_config.persistent);
                 }
                 tfinal = (MPI_Wtime() - t0) / n_iters;
-                MPI_Allreduce(&tfinal, &t0, 1, MPI_DOUBLE, MPI_MAX, 
+                MPI_Allreduce(&tfinal, &t0, 1, MPI_DOUBLE, MPI_MAX,
                         MPI_COMM_WORLD);
-                if (rank == 0) printf("CG with %s Allreduce: %e\n", 
-                        names[idx], t0);
+                if (rank == 0) printf("CG with %s Allreduce: %e\n",
+                        allreduce_config.name, t0);
             }
         }
-
     }
     MPIL_Comm_free(&mpil_comm);
 

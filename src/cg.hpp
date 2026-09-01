@@ -3,6 +3,7 @@
 
 #include <math.h>
 
+#include "mpi.h"
 #include "par_binary_IO.hpp"
 #include "sparse_mat.hpp"
 

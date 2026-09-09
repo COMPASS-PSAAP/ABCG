@@ -1,152 +1,124 @@
 #ifndef ABCG_CG_HEADER
 #define ABCG_CG_HEADER
 
-#include <math.h>
-
-#include "mpi.h"
 #include "par_binary_IO.hpp"
 #include "sparse_mat.hpp"
+#include "comm/comm_routines.hpp"
 
-namespace ABCG
+void spmv(double alpha, Mat& A, double* x, double beta, double* b);
+void spmv(double alpha,
+          ParMat& A,
+          std::vector<double>& x,
+          double beta,
+          std::vector<double>& b,
+          SpMVComm* comm);
+void axpy(double alpha, std::vector<double>& x, std::vector<double>& y);
+void scale(double alpha, std::vector<double>& x);
+double inner_product(std::vector<double>& a,
+                     std::vector<double>& b,
+                     AllreduceComm* comm);
+
+
+template <typename SComm, typename AComm>
+int CG(ParMat& A, 
+        std::vector<double>& x, 
+        std::vector<double>& b, 
+        int max_iters = 500,
+        double tol = 1e-06)
 {
-    int max_tests = 0;
-    int max_iters = 0;
-    double tol    = 0;
-}  // namespace ABCG
+    int rank, num_procs;
+    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+    MPI_Comm_size(MPI_COMM_WORLD, &num_procs);
 
-// Serial SpMV b = alpha*A*x + beta*b
-void spmv(double alpha, Mat& A, std::vector<double>& x, double beta, std::vector<double>& b)
-{
-    double sum;
-    int start, end;
+    // CG Variables
+    std::vector<double> r(A.local_rows);
+    std::vector<double> p(A.local_rows);
+    std::vector<double> Ap(A.local_rows);
+    std::vector<double> recvbuf(A.recv_comm.size_msgs);
+    std::vector<double> sendbuf(A.send_comm.size_msgs);
 
-    for (int i = 0; i < A.n_rows; i++)
+    // Setup persistent allreduces
+    double local_sum, global_sum;
+
+    SpMVComm* spmv_comm = new SComm();
+    AllreduceComm* allreduce_comm = new AComm();
+
+    spmv_comm->init(A, sendbuf.data(), recvbuf.data());
+    allreduce_comm->init(&local_sum, &global_sum);
+
+    int iter, recompute_r;
+    double alpha, beta;
+    double rr_inner, next_inner, App_inner;
+    double norm_r;
+    // int max_iter = ((int)(1.3*b.size())) + 2;
+    int max_iter = 500;
+
+    // r0 = b - A * x0
+    r = b;
+    spmv(-1.0, A, x, 1.0, r, spmv_comm);
+
+    // p0 = r0
+    p = r;
+
+    // Find initial (r, r) and residual
+    rr_inner = inner_product(r, r, allreduce_comm);
+
+    norm_r = sqrt(rr_inner);
+
+    // Scale tolerance by norm_r
+    if (norm_r != 0.0)
     {
-        start = A.rowptr[i];
-        end   = A.rowptr[i + 1];
-        sum   = 0;
-        for (int j = start; j < end; j++)
+        tol = tol * norm_r;
+    }
+
+    // How often should r be recomputed
+    recompute_r = 8;
+    iter        = 0;
+
+    // Main CG Loop
+    while (norm_r > tol && iter < max_iter)
+    {
+        // alpha_i = (r_i, r_i) / (A*p_i, p_i)
+        spmv(1.0, A, p, 0.0, Ap, spmv_comm);
+        App_inner = inner_product(Ap, p, allreduce_comm);
+        if (App_inner < 0.0)
         {
-            sum += A.data[j] * x[A.col_idx[j]];
+            printf("Indefinite matrix detected in CG! Aborting...\n");
+            MPI_Abort(MPI_COMM_WORLD, -1);
         }
-        b[i] = alpha * sum + beta * b[i];
+        alpha = rr_inner / App_inner;
+
+        axpy(alpha, x, p);
+
+        // x_{i+1} = x_i + alpha_i * p_i
+        if ((iter % recompute_r) && iter > 0)
+        {
+            axpy(-1.0 * alpha, r, Ap);
+        }
+        else
+        {
+            r = b;
+            spmv(-1.0, A, x, 1.0, r, spmv_comm);
+        }
+
+        next_inner = inner_product(r, r, allreduce_comm);
+        beta       = next_inner / rr_inner;
+
+        scale(beta, p);
+        axpy(1.0, p, r);
+
+        // Update next inner product
+        rr_inner = next_inner;
+        norm_r   = sqrt(rr_inner);
+
+        iter++;
     }
+
+    delete spmv_comm;
+    delete allreduce_comm;
+
+    return iter;
 }
 
-void axpy(double alpha, std::vector<double>& x, std::vector<double>& y)
-{
-    for (int i = 0; i < x.size(); i++)
-    {
-        x[i] = x[i] + alpha * y[i];
-    }
-}
-
-void scale(double alpha, std::vector<double>& x)
-{
-    for (int i = 0; i < x.size(); i++)
-    {
-        x[i] = alpha * x[i];
-    }
-}
-
-double calc_norm_b(std::vector<double>& b)
-{
-    double norm_b = 0;
-    for (int i = 0; i < b.size(); i++)
-    {
-        norm_b += b[i] * b[i];
-    }
-    MPI_Allreduce(MPI_IN_PLACE, &norm_b, 1, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
-    return sqrt(norm_b);
-}
-
-int calc_num_iters(const std::vector<double>& r,
-                   int rank,
-                   int conv_iter,
-                   double norm_b,
-                   double tfinal,
-                   std::string test_name)
-{
-    double sum = 0;
-    for (int i = 0; i < r.size(); i++)
-    {
-        sum += r[i] * r[i];
-    }
-    MPI_Allreduce(MPI_IN_PLACE, &sum, 1, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
-    if (rank == 0)
-    {
-        std::printf("%s: %d iter, norm %e", test_name.c_str(), conv_iter, sqrt(sum) / norm_b);
-    }
-
-    int n_iters  = 1;
-    double t_max = 0;
-    MPI_Allreduce(&tfinal, &t_max, 1, MPI_DOUBLE, MPI_MAX, MPI_COMM_WORLD);
-    if (t_max < 1.0)
-    {
-        n_iters = 1.0 / t_max;
-    }
-
-    if (rank == 0)
-    {
-        std::printf(" (%d iter(s)/test)\n", n_iters);
-        std::cout << std::flush;
-    }
-    return n_iters;
-}
-
-void initialize_defaults(int max_tests = 5)
-{
-    ABCG::max_iters = 500;
-    ABCG::max_tests = max_tests;
-    ABCG::tol       = 1e-6;
-}
-
-ParMat initialize_cg(
-    int* argc, char*** argv, const int rank, std::vector<double>& x, std::vector<double>& b)
-{
-    // Check for name of matrix to use
-    const char* filename = "Dubcova2.pm";
-    if ((*argc) > 1)
-    {
-        filename = (*argv)[1];
-    }
-    int num_tests = 5;
-    if ((*argc) > 2)
-    {
-        num_tests = std::atoi((*argv)[2]);
-    }
-
-    double t0, t1;
-
-    ParMat A;
-    MPI_Barrier(MPI_COMM_WORLD);
-    t0 = MPI_Wtime();
-    readParMatrix(filename, A);
-    t1 = MPI_Wtime() - t0;
-    MPI_Allreduce(&t1, &t0, 1, MPI_DOUBLE, MPI_MAX, MPI_COMM_WORLD);
-    if (rank == 0)
-    {
-        std::printf("Read matrix: %e\n", t0);
-        std::cout << std::flush;
-    }
-
-    MPI_Barrier(MPI_COMM_WORLD);
-    t0 = MPI_Wtime();
-    form_comm(A);
-    t1 = MPI_Wtime() - t0;
-    MPI_Allreduce(&t1, &t0, 1, MPI_DOUBLE, MPI_MAX, MPI_COMM_WORLD);
-    if (rank == 0)
-    {
-        std::printf("Form comm: %e\n", t0);
-        std::cout << std::flush;
-    }
-
-    x.resize(A.local_cols);
-    b.resize(A.local_rows);
-
-    initialize_defaults(num_tests);
-
-    return A;
-}
 
 #endif

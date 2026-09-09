@@ -18,7 +18,7 @@
 #include "limits.h"
 #include "sparse_mat.hpp"
 
-bool little_endian()
+inline bool little_endian()
 {
     int num = 1;
     return (*(char*)&num == 1);
@@ -31,7 +31,7 @@ void endian_swap(T* objp)
     std::reverse(memp, memp + sizeof(T));
 }
 
-int readParMatrix(const char* filename, ParMat& A)
+inline int readParMatrix(const char* filename, ParMat& A)
 {
     int rank, num_procs;
     MPI_Comm_rank(MPI_COMM_WORLD, &rank);

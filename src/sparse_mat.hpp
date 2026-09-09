@@ -43,7 +43,7 @@ struct ParMat
     MPI_Comm dist_graph_comm;
 };
 
-void form_recv_comm(ParMat& A)
+inline void form_recv_comm(ParMat& A)
 {
     int rank, num_procs;
     MPI_Comm_rank(MPI_COMM_WORLD, &rank);
@@ -91,7 +91,7 @@ void form_recv_comm(ParMat& A)
 }
 
 // Must Form Recv Comm before Send!
-void form_send_comm_standard(ParMat& A)
+inline void form_send_comm_standard(ParMat& A)
 {
     int rank, num_procs;
     MPI_Comm_rank(MPI_COMM_WORLD, &rank);
@@ -176,7 +176,7 @@ void form_send_comm_standard(ParMat& A)
     }
 }
 
-void form_comm(ParMat& A)
+inline void form_comm(ParMat& A)
 {
     // Form Recv Side
     form_recv_comm(A);

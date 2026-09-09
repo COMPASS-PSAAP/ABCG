@@ -42,3 +42,4 @@
 
 build/*
 plots/*.pdf
+**/.DS_Store

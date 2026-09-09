@@ -5,6 +5,8 @@
 #include "sparse_mat.hpp"
 #include "comm/comm_routines.hpp"
 
+#include <cmath>
+
 void spmv(double alpha, Mat& A, double* x, double beta, double* b);
 void spmv(double alpha,
           ParMat& A,
